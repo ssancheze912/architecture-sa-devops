@@ -1,0 +1,13 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: reconcile-user-company-assignments
+  namespace: third-party
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    # Triggers POST /reconcile-user-company-assignments on the third-party app every hour.
+    # Implemented: UserCompanyAssignmentReconciliationJob fetches snapshot from segments.segments.
+    - name: schedule
+      value: "@every 1h"

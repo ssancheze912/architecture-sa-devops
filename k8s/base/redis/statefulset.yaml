@@ -1,0 +1,57 @@
+# Redis StatefulSet con persistencia AOF
+# ─────────────────────────────────────────────────────────────────────────────
+# Usado por Dapr como state store para access-manager y segments.
+#
+# SANDBOX: 1 réplica, sin Sentinel. SPOF documentado y aceptado para dev.
+# PRODUCCIÓN: Migrar a Google Cloud Memorystore (redis gestionado, HA nativa).
+#   Cambiar redisHost en dapr/{service}/statestore.yaml a la IP del Memorystore.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dapr-redis
+  namespace: dapr-system
+  labels:
+    app: dapr-redis
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/part-of: financiero-platform
+spec:
+  serviceName: dapr-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dapr-redis
+  template:
+    metadata:
+      labels:
+        app: dapr-redis
+    spec:
+      securityContext:
+        fsGroup: 999      # UID del usuario redis en la imagen redis:alpine
+        runAsUser: 999
+        runAsGroup: 999
+      containers:
+        - name: redis
+          image: redis:8-alpine
+          args: ["--appendonly", "yes", "--save", "60", "1"]
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 1Gi

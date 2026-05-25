@@ -1,0 +1,156 @@
+# ============================================================================
+# Configuración centralizada — Ambiente QA
+# ============================================================================
+# Template: copiar environments/dev.yaml, reemplazar valores marcados <PLACEHOLDER>.
+# Convención naming: sufijo "-qa" en lugar de "-dev".
+#
+# PASOS ANTES DE USAR:
+#   1. Crear proyecto GCP prj-sie-fin-financiero-qa
+#   2. Ejecutar terraform/bootstrap/ con el nuevo project_id
+#   3. Completar todos los <PLACEHOLDER>
+#   4. Volver a ejecutar: /flow-nuevo-ambiente qa
+# ============================================================================
+
+gcp:
+  project_id: prj-sie-fin-financiero-qas
+  project_number: "763982348967"
+  region: us-east1
+
+naming:
+  business_unit: financiero
+  product_suite: fin
+  environment: qa
+
+environment_suffix: qa
+
+frontend:
+  vite_mode: production  # QA valida en modo prod antes que llegar a prod
+
+gke:
+  cluster_name: gke-sie-fin-financiero-qa
+  network: "projects/prj-sie-com-vpc-host-qa/global/networks/vpc-sie-shared-qa"
+  subnetwork: "projects/prj-sie-com-vpc-host-qa/regions/us-east1/subnetworks/snt-sie-bus-fin-use1-qa"
+  release_channel: REGULAR
+  master_cidr: "172.16.0.48/28"
+  cluster_secondary_range_name: pods-fin-use1-qa
+  services_secondary_range_name: svc-fin-use1-qa
+
+database:
+  type: cloud-sql
+  engine: postgresql
+  version: "POSTGRES_18"
+  instance_name: pgsql-fin-financiero-qa
+  database_name: finance-qa
+  tier: db-g1-small
+  availability: ZONAL  # QA puede ser ZONAL; cambiar a REGIONAL si requiere HA
+  edition: ENTERPRISE
+  private_network: "projects/prj-sie-com-vpc-host-qa/global/networks/vpc-sie-shared-qa"
+
+dns:
+  zone_name: siesacloud-dev
+  dns_name: "siesacloud.dev."
+  domain: finance-qa.siesacloud.dev
+
+gateway:
+  name: financiero-qa-gateway
+  namespace: gateway-infra
+  class: gke-l7-global-external-managed
+  cert_map: finance-qa-siesacloud-dev-map
+  external_ip: "8.232.54.161"
+
+certificate:
+  name: finance-cert-qa
+
+namespaces:
+  - gateway-infra
+  - app-shell
+  - access-manager
+  - segments
+  - base-config
+  - third-party
+  - accounting
+  - liquid-tax
+  - observability
+
+services:
+  access-manager:
+    sa_name: sa-sie-fin-accmgr-cicd
+    github_repo: SiesaTeams/business-access-manager
+    description: "Docker images for access-manager service"
+  app-shell:
+    sa_name: sa-sie-fin-appshell-cicd
+    github_repo: SiesaTeams/business-financiero-app-shell
+    description: "Docker images for app-shell SPA"
+  segments:
+    sa_name: sa-sie-fin-segments-cicd
+    github_repo: SiesaTeams/business-financiero-segments-service
+    description: "Docker images for segments service"
+  base-config:
+    sa_name: sa-sie-fin-baseconfig-cicd
+    github_repo: SiesaTeams/business-financiero-base-config
+    description: "Docker images for base-config service"
+  third-party:
+    sa_name: sa-sie-fin-tprt-cicd
+    github_repo: SiesaTeams/business-financiero-third-party-service
+    description: "Docker images for third-party service"
+  accounting:
+    sa_name: sa-sie-fin-acct-cicd
+    github_repo: SiesaTeams/business-financiero-accounting-service
+    description: "Docker images for accounting service"
+  liquid-tax:
+    sa_name: sa-sie-fin-liquid-tax-cicd
+    github_repo: SiesaTeams/business-financiero-liquid-tax-service
+    description: "Docker images for liquid-tax service"
+
+deploy:
+  sa_name: sa-sie-fin-qa-cicd
+  github_repo: SiesaTeams/business-financiero-deploy
+  roles:
+    - roles/container.admin
+    - roles/compute.securityAdmin
+    - roles/compute.viewer
+    - roles/artifactregistry.admin
+    - roles/cloudsql.admin
+    - roles/dns.admin
+    - roles/iam.serviceAccountAdmin
+    - roles/secretmanager.admin
+    - roles/pubsub.admin
+    - roles/storage.admin
+    - roles/resourcemanager.projectIamAdmin
+    - roles/cloudbuild.builds.editor
+    - roles/cloudbuild.workerPoolUser
+    - roles/certificatemanager.editor
+    - roles/serviceusage.serviceUsageConsumer
+    - roles/iam.serviceAccountUser
+
+wif:
+  pool_name: github-actions
+  provider_id: github
+
+cloud_build:
+  worker_pool: projects/prj-sie-fin-financiero-qas/locations/us-east1/workerPools/financiero-pool
+
+redis:
+  image: "redis:8-alpine"
+  namespace: dapr-system
+  service_name: dapr-redis
+  port: 6379
+  persistence:
+    enabled: true
+    storage_class: standard-rwo
+    storage_size: 1Gi
+
+dev_access:
+  enabled: false  # Habilitar una vez que existan los grupos en Google Workspace
+  admins_group: "group:g-gcp-fld-sie-bus-financiero-qa-admins@siesacloud.com"
+  devs_group: "group:g-gcp-fld-sie-bus-financiero-qa-devs@siesacloud.com"
+
+monitoring:
+  alert_email: "diego.santacruz@siesa.com"
+
+versions:
+  terraform: "1.14"
+  google_provider: "~> 7.0"
+  dotnet: "10.0.x"
+  node: "24"
+  pnpm: "10"

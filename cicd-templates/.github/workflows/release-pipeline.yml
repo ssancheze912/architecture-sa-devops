@@ -1,0 +1,13 @@
+# Release Pipeline - referencia a qa-pipeline.yml
+#
+# El release pipeline para QA está en qa-pipeline.yml (este directorio).
+# Este archivo se mantiene como placeholder para el pipeline de PROD
+# cuando ese ambiente esté listo.
+#
+# Para PROD, el patrón será similar a qa-pipeline.yml con:
+#   PROJECT_ID: prj-sie-fin-financiero-prod
+#   GKE_CLUSTER: gke-sie-fin-financiero-prod
+#   WORKER_POOL: projects/prj-sie-fin-financiero-prod/locations/us-east1/workerPools/financiero-pool
+#   environment: prod  (requiere aprobación manual)
+#
+# TODO: implementar cuando ambiente PROD esté provisionado.

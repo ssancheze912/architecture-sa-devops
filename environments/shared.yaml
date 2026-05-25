@@ -1,0 +1,223 @@
+# ============================================================================
+# Configuración centralizada — Recursos COMPARTIDOS entre todos los ambientes
+# ============================================================================
+# Consumido exclusivamente por terraform/environments/shared/main.tf.
+# NO contiene parámetros de ambiente específico (cluster, DB, dominio, gateway).
+#
+# Recursos gestionados desde este archivo:
+#   - Zona DNS siesacloud-dev
+#   - Artifact Registry repos (access-manager, app-shell, segments, base-config)
+#   - Workload Identity Federation pool + provider
+#   - Service Accounts CI/CD de cada servicio (compartidos entre ambientes)
+#   - Service Account del ambiente principal (dev → futuro dev)
+#   - Cloud Build Worker Pool
+# ============================================================================
+
+# --- Proyecto GCP (Spoke — Cloud Build, GKE, WIF, SAs) ---
+gcp:
+  project_id: prj-sie-fin-financiero-dev
+  project_number: "641762852790"
+  region: us-east1
+
+# --- Hub (Artifact Registry + WIF pool + CI/CD SAs compartidos entre ambientes) ---
+hub:
+  project_id: prj-sie-sb-fin-common
+  project_number: "122174909048"
+
+# --- Naming ---
+naming:
+  business_unit: financiero
+  product_suite: fin
+
+# --- DNS (zona compartida) ---
+dns:
+  zone_name: siesacloud-dev
+  dns_name: "siesacloud.dev."
+
+# --- Servicios (SAs de CI/CD + Artifact Registry repos) ---
+# Estos servicios son compartidos — mismas SAs usan todos los ambientes.
+services:
+  access-manager:
+    sa_name: sa-sie-fin-accmgr-cicd
+    github_repo: SiesaTeams/business-access-manager
+    description: "Docker images for access-manager service"
+    roles:
+      - roles/cloudbuild.builds.editor
+      - roles/artifactregistry.writer
+      - roles/container.developer
+      - roles/secretmanager.secretAccessor
+      - roles/cloudsql.client
+      - roles/cloudbuild.workerPoolUser
+      - roles/clouddeploy.releaser
+      - roles/iam.serviceAccountUser
+      - roles/storage.admin
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+  app-shell:
+    sa_name: sa-sie-fin-appshell-cicd
+    github_repo: SiesaTeams/business-financiero-app-shell
+    description: "Docker images for app-shell SPA"
+    roles:
+      - roles/cloudbuild.builds.editor
+      - roles/artifactregistry.writer
+      - roles/container.developer
+      - roles/secretmanager.secretAccessor
+      - roles/cloudsql.client
+      - roles/cloudbuild.workerPoolUser
+      - roles/clouddeploy.releaser
+      - roles/iam.serviceAccountUser
+      - roles/storage.admin
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+  segments:
+    sa_name: sa-sie-fin-segments-cicd
+    github_repo: SiesaTeams/business-financiero-segments-service
+    description: "Docker images for segments service"
+    roles:
+      - roles/cloudbuild.builds.editor
+      - roles/artifactregistry.writer
+      - roles/container.developer
+      - roles/secretmanager.secretAccessor
+      - roles/cloudsql.client
+      - roles/cloudbuild.workerPoolUser
+      - roles/clouddeploy.releaser
+      - roles/iam.serviceAccountUser
+      - roles/storage.admin
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+  base-config:
+    sa_name: sa-sie-fin-baseconfig-cicd
+    github_repo: SiesaTeams/business-financiero-base-config
+    description: "Docker images for base-config service"
+    roles:
+      - roles/cloudbuild.builds.editor
+      - roles/artifactregistry.writer
+      - roles/container.developer
+      - roles/secretmanager.secretAccessor
+      - roles/cloudsql.client
+      - roles/cloudbuild.workerPoolUser
+      - roles/clouddeploy.releaser
+      - roles/iam.serviceAccountUser
+      - roles/storage.admin
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+  third-party:
+    sa_name: sa-sie-fin-tprt-cicd
+    github_repo: SiesaTeams/business-financiero-third-party-service
+    description: "Docker images for third-party service"
+    roles:
+      - roles/cloudbuild.builds.editor
+      - roles/artifactregistry.writer
+      - roles/container.developer
+      - roles/secretmanager.secretAccessor
+      - roles/cloudsql.client
+      - roles/cloudbuild.workerPoolUser
+      - roles/clouddeploy.releaser
+      - roles/iam.serviceAccountUser
+      - roles/storage.admin
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+  accounting:
+    sa_name: sa-sie-fin-acct-cicd
+    github_repo: SiesaTeams/business-financiero-accounting-service
+    description: "Docker images for accounting service"
+    roles:
+      - roles/cloudbuild.builds.editor
+      - roles/artifactregistry.writer
+      - roles/container.developer
+      - roles/secretmanager.secretAccessor
+      - roles/cloudsql.client
+      - roles/cloudbuild.workerPoolUser
+      - roles/clouddeploy.releaser
+      - roles/iam.serviceAccountUser
+      - roles/storage.admin
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+  liquid-tax:
+    sa_name: sa-sie-fin-liquid-tax-cicd
+    github_repo: SiesaTeams/business-financiero-liquid-tax-service
+    description: "Docker images for liquid-tax service"
+    roles:
+      - roles/cloudbuild.builds.editor
+      - roles/artifactregistry.writer
+      - roles/container.developer
+      - roles/secretmanager.secretAccessor
+      - roles/cloudsql.client
+      - roles/cloudbuild.workerPoolUser
+      - roles/clouddeploy.releaser
+      - roles/iam.serviceAccountUser
+      - roles/storage.admin
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+
+# --- Deploy SA del ambiente principal (dev) ---
+# Roles: incluye cloudbuild.builds.editor + cloudbuild.workerPoolUser para
+# poder disparar y usar el worker pool desde el pipeline IaC.
+deploy:
+  sa_name: sa-sie-fin-sandbox-dev-cicd
+  github_repo: SiesaTeams/business-financiero-deploy
+  roles:
+    - roles/container.admin
+    - roles/compute.securityAdmin
+    - roles/compute.viewer
+    - roles/artifactregistry.admin
+    - roles/cloudsql.admin
+    - roles/dns.admin
+    - roles/iam.serviceAccountAdmin
+    - roles/secretmanager.admin
+    - roles/pubsub.admin
+    - roles/storage.admin
+    - roles/resourcemanager.projectIamAdmin
+    - roles/cloudbuild.builds.editor
+    - roles/cloudbuild.workerPoolUser
+    - roles/cloudbuild.workerPoolOwner
+    - roles/iam.workloadIdentityPoolAdmin
+    - roles/certificatemanager.editor
+    - roles/monitoring.admin
+    - roles/logging.configWriter
+    - roles/serviceusage.serviceUsageConsumer
+
+# --- Deploy SA del ambiente QA (vive en el proyecto DEV, roles cross-project en QA) ---
+# El WIF pool es compartido (vive en este proyecto DEV).
+# El SA tiene roles sobre prj-sie-fin-financiero-qas via google_project_iam_member cross-project.
+qa_deploy:
+  sa_name: sa-sie-fin-qa-cicd
+  github_repo: SiesaTeams/business-financiero-deploy
+  qa_project_id: prj-sie-fin-financiero-qas
+  roles:
+    - roles/container.admin
+    - roles/compute.securityAdmin
+    - roles/compute.viewer
+    - roles/artifactregistry.admin
+    - roles/cloudsql.admin
+    - roles/dns.admin
+    - roles/iam.serviceAccountAdmin
+    - roles/secretmanager.admin
+    - roles/pubsub.admin
+    - roles/storage.admin
+    - roles/resourcemanager.projectIamAdmin
+    - roles/cloudbuild.builds.editor
+    - roles/cloudbuild.workerPoolOwner
+    - roles/certificatemanager.editor
+    - roles/serviceusage.serviceUsageConsumer
+    - roles/iam.serviceAccountUser
+    - roles/monitoring.admin
+    - roles/logging.configWriter
+
+# --- Workload Identity Federation ---
+wif:
+  pool_name: github-actions
+  provider_id: github
+
+# --- Cloud Build Worker Pool ---
+# Peered a la Shared VPC para acceder al API server de GKE con Master Authorized Networks.
+# VERIFICAR: tras el primer import, ejecutar `terraform plan` y ajustar
+#            worker_config si hay drift (machine_type, disk_size_gb).
+cloud_build:
+  worker_pool_name: financiero-pool
+  network: "projects/prj-sie-com-vpc-host-dev/global/networks/vpc-sie-shared-dev"
+
+# --- Versiones ---
+versions:
+  terraform: "1.14"
+  google_provider: "~> 7.0"

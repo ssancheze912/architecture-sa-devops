@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+data:
+  config.yaml: |
+    receivers:
+      zipkin:
+        endpoint: 0.0.0.0:9411
+
+    processors:
+      # Descarta spans de StreamingPull de Google Pub/Sub que terminan en ERROR
+      # por razones esperadas del protocolo (cierre normal ~30 min, context canceled
+      # en shutdown). Sin este filtro, otelgrpc v0.60.0 los marca como ERROR aunque
+      # no sean fallos reales de la aplicación.
+      #
+      # Cubre dos casos:
+      #   - gRPC 14 (UNAVAILABLE): cierre periódico normal del stream por GCP
+      #   - gRPC  1 (CANCELLED):   cancelación de context en graceful shutdown del pod
+      filter/drop-pubsub-streamingpull-noise:
+        error_mode: ignore
+        traces:
+          span:
+            - 'span.attributes["rpc.service"] == "google.pubsub.v1.Subscriber" and span.attributes["rpc.method"] == "StreamingPull" and span.status.code == STATUS_CODE_ERROR'
+
+    exporters:
+      zipkin:
+        endpoint: http://jaeger.observability.svc.cluster.local:9411/api/v2/spans
+        format: proto
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [zipkin]
+          processors: [filter/drop-pubsub-streamingpull-noise]
+          exporters: [zipkin]

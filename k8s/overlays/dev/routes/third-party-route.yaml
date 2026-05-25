@@ -1,0 +1,53 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: third-party-route
+  namespace: third-party
+  labels:
+    app.kubernetes.io/name: third-party
+    app.kubernetes.io/part-of: financiero-platform
+spec:
+  parentRefs:
+    - name: financiero-dev-gateway
+      namespace: gateway-infra
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mfe/third-party
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: third-party-mfe
+          port: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/third-party/health
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /health
+      backendRefs:
+        - name: third-party-api
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/third-party
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /api/v1
+      backendRefs:
+        - name: third-party-api
+          port: 8080

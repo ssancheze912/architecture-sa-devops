@@ -1,0 +1,199 @@
+# ============================================================================
+# Configuración centralizada del proyecto — Ambiente Dev-Dev
+# ============================================================================
+# Override de project-config.yaml para el ambiente dev paralelo.
+# Coexiste con el ambiente dev actual en el mismo proyecto GCP.
+#
+# Recursos que cambian respecto a dev:
+#   - gke.cluster_name, gke.master_cidr
+#   - database.instance_name
+#   - gateway.name, gateway.cert_map
+#   - dns.domain
+#   - deploy.sa_name
+#   - environment_suffix (nuevo, para labels)
+#
+# Recursos compartidos (mismo proyecto, no se duplican):
+#   - Artifact Registry repos (compartidos con dev)
+#   - Zona DNS siesacloud-dev (compartida con dev)
+#   - WIF pool github-actions (compartido con dev)
+#   - Cloud Build worker pool (compartido con dev)
+# ============================================================================
+
+# --- Proyecto GCP ---
+gcp:
+  project_id: prj-sie-fin-financiero-dev
+  project_number: "641762852790"
+  region: us-east1
+
+# --- Naming ---
+naming:
+  business_unit: financiero
+  product_suite: fin
+  environment: dev
+
+# --- Ambiente (para labels y distinción de recursos) ---
+environment_suffix: dev
+
+# --- Frontend build ---
+# vite_mode se pasa como build arg al Dockerfile del MFE.
+# Controla process.env.NODE_ENV y el modo de React (development = warnings activos).
+# Valores válidos: development | production
+frontend:
+  vite_mode: development
+
+# --- GKE ---
+# Shared VPC: la red y subred están en el proyecto host prj-sie-com-vpc-host-dev.
+# Se requiere el self-link completo para que Terraform resuelva correctamente en Shared VPC.
+gke:
+  cluster_name: gke-sie-fin-sandbox-dev
+  network: "projects/prj-sie-com-vpc-host-dev/global/networks/vpc-sie-shared-dev"
+  subnetwork: "projects/prj-sie-com-vpc-host-dev/regions/us-east1/subnetworks/snt-sie-bus-fin-use1-dev"
+  release_channel: REGULAR
+  master_cidr: "172.16.0.16/28"
+  cluster_secondary_range_name: pods-fin-use1-dev
+  services_secondary_range_name: svc-fin-use1-dev
+
+# --- Base de datos ---
+# private_network referencia la Shared VPC del proyecto host
+database:
+  type: cloud-sql
+  engine: postgresql
+  version: "POSTGRES_18"
+  instance_name: pgsql-fin-sandbox-dev
+  database_name: finance-dev
+  tier: db-g1-small
+  availability: ZONAL
+  edition: ENTERPRISE
+  private_network: "projects/prj-sie-com-vpc-host-dev/global/networks/vpc-sie-shared-dev"
+
+# --- DNS ---
+dns:
+  zone_name: siesacloud-dev
+  dns_name: "siesacloud.dev."
+  domain: finance.siesacloud.dev
+
+# --- Gateway ---
+gateway:
+  name: financiero-dev-gateway
+  namespace: gateway-infra
+  class: gke-l7-global-external-managed
+  cert_map: finance-siesacloud-dev-map
+  external_ip: "34.110.139.114"
+
+# --- Certificado TLS ---
+certificate:
+  name: finance-siesacloud-dev-cert
+
+# --- Namespaces ---
+namespaces:
+  - gateway-infra
+  - app-shell
+  - access-manager
+  - segments
+  - base-config
+  - third-party
+  - accounting
+  - liquid-tax
+  - observability
+
+# --- Servicios (CI/CD + Artifact Registry) ---
+# Comparten los mismos repos de Artifact Registry que el ambiente dev
+services:
+  access-manager:
+    sa_name: sa-sie-fin-accmgr-cicd
+    github_repo: SiesaTeams/business-access-manager
+    description: "Docker images for access-manager service"
+  app-shell:
+    sa_name: sa-sie-fin-appshell-cicd
+    github_repo: SiesaTeams/business-financiero-app-shell
+    description: "Docker images for app-shell SPA"
+  segments:
+    sa_name: sa-sie-fin-segments-cicd
+    github_repo: SiesaTeams/business-financiero-segments-service
+    description: "Docker images for segments service"
+  base-config:
+    sa_name: sa-sie-fin-baseconfig-cicd
+    github_repo: SiesaTeams/business-financiero-base-config
+    description: "Docker images for base-config service"
+  third-party:
+    sa_name: sa-sie-fin-tprt-cicd
+    github_repo: SiesaTeams/business-financiero-third-party-service
+    description: "Docker images for third-party service"
+  accounting:
+    sa_name: sa-sie-fin-acct-cicd
+    github_repo: SiesaTeams/business-financiero-accounting-service
+    description: "Docker images for accounting service"
+  liquid-tax:
+    sa_name: sa-sie-fin-liquid-tax-cicd
+    github_repo: SiesaTeams/business-financiero-liquid-tax-service
+    description: "Docker images for liquid-tax service"
+
+# --- Deploy SA (infraestructura dev) ---
+deploy:
+  sa_name: sa-sie-fin-sandbox-dev-cicd
+  github_repo: SiesaTeams/business-financiero-deploy
+  roles:
+    - roles/container.admin
+    - roles/compute.securityAdmin
+    - roles/compute.viewer
+    - roles/artifactregistry.admin
+    - roles/cloudsql.admin
+    - roles/dns.admin
+    - roles/iam.serviceAccountAdmin
+    - roles/secretmanager.admin
+    - roles/pubsub.admin
+    - roles/storage.admin
+    - roles/resourcemanager.projectIamAdmin
+    - roles/cloudbuild.builds.editor
+    - roles/cloudbuild.workerPoolUser
+    - roles/certificatemanager.editor
+
+# --- WIF (Workload Identity Federation) ---
+# Pool compartido con el ambiente dev
+wif:
+  pool_name: github-actions
+  provider_id: github
+
+# --- Cloud Build ---
+# Worker pool compartido con el ambiente dev
+cloud_build:
+  worker_pool: projects/prj-sie-fin-financiero-dev/locations/us-east1/workerPools/financiero-pool
+
+# --- Redis ---
+redis:
+  image: "redis:8-alpine"
+  namespace: dapr-system
+  service_name: dapr-redis
+  port: 6379
+  persistence:
+    enabled: true
+    storage_class: standard-rwo
+    storage_size: 1Gi
+    # PRODUCCIÓN: reemplazar por Google Cloud Memorystore (google_redis_instance en TF)
+
+# --- Acceso de desarrollo local (dev-connect.sh) ---
+# Los grupos ya tienen roles extensos heredados de la carpeta (editor, secretmanager.admin, etc.).
+# Se agregan roles específicos que los grupos NO tienen via carpeta:
+#   admins: + roles/cloudsql.client + roles/container.admin (SQL tunnel + kubectl/MAN)
+#   devs:   + roles/cloudsql.client (SQL tunnel)
+#
+# Membresía de grupos (gestionada en Google Workspace, no en Terraform):
+#   admins: abel.gonzalez@siesa.com, diego.santacruz@siesa.com
+#   devs:   jacastellanosm@siesa.com, fabian.capote@siesa.com, lvilora@siesa.com, cesar.rincon@siesa.com
+dev_access:
+  admins_group: "group:g-gcp-fld-sie-bus-financiero-dev-admins@siesacloud.com"
+  devs_group: "group:g-gcp-fld-sie-bus-financiero-dev-devs@siesacloud.com"
+
+# --- Monitoring y Alertas ---
+# alert_email: destinatario de alertas Cloud Monitoring (backup, disco, etc.)
+# Cambiar por lista de distribución del equipo si se requiere notificar a varios.
+monitoring:
+  alert_email: "diego.santacruz@siesa.com"
+
+# --- Versiones de herramientas ---
+versions:
+  terraform: "1.14"
+  google_provider: "~> 7.0"
+  dotnet: "10.0.x"
+  node: "24"
+  pnpm: "10"

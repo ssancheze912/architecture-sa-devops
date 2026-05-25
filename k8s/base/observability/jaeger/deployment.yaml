@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: observability
+  labels:
+    app: jaeger
+  annotations:
+    app.kubernetes.io/managed-by: "terraform-cicd"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.57
+          ports:
+            - name: ui
+              containerPort: 16686   # Jaeger UI
+            - name: admin
+              containerPort: 14269   # Admin / health check
+            - name: zipkin
+              containerPort: 9411    # Zipkin ingest — Dapr envía trazas aquí
+            - name: grpc-otlp
+              containerPort: 4317    # OTLP gRPC (opcional, para future use)
+          args:
+            - --query.base-path=/observability/jaeger
+            - --memory.max-traces=5000
+          env:
+            - name: COLLECTOR_ZIPKIN_HOST_PORT
+              value: ":9411"
+            - name: SPAN_STORAGE_TYPE
+              value: memory
+            # SANDBOX: in-memory storage. Las trazas se pierden al reiniciar el pod.
+            # PRODUCCIÓN: migrar a Elasticsearch o Cloud Trace (OTLP).
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 14269   # Admin port — siempre retorna 200 cuando Jaeger está listo
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 14269
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: import-map
+  namespace: app-shell
+  labels:
+    app.kubernetes.io/component: import-map
+    app.kubernetes.io/part-of: financiero-platform
+data:
+  importmap.json: |
+    {
+      "imports": {
+        "@siesa/access-manager": "/mfe/access-manager/spa-entry.js",
+        "@siesa/segments": "/mfe/segments/spa-entry.js",
+        "@siesa/base-config": "/mfe/base-config/spa-entry.js",
+        "@siesa/third-party": "/mfe/third-party/spa-entry.js",
+        "@siesa/accounting": "/mfe/accounting/spa-entry.js",
+        "@siesa/liquid-tax": "/mfe/liquid-tax/spa-entry.js"
+      }
+    }

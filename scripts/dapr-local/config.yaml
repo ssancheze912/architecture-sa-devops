@@ -1,0 +1,13 @@
+# Configuración del sidecar Dapr para desarrollo local.
+# Copiar a: ~/.dapr/config.yaml
+#
+# mTLS deshabilitado deliberadamente — en local no hay Sentry (CA de Dapr).
+# RESTRICCIÓN: NO usar en staging ni producción.
+# En el cluster, mTLS está habilitado por defecto en la instalación Helm de Dapr.
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: daprConfig
+spec:
+  mtls:
+    enabled: false

@@ -1,0 +1,277 @@
+# Staging Pipeline - Promote & Deploy to Staging
+# Ref CAF: Standard 16 - CI/CD and Automation
+#
+# PRINCIPIO: Build Once, Deploy Anywhere.
+#   Las imágenes se compilan UNA SOLA VEZ en DEV (ci-pipeline.yml en develop).
+#   Este pipeline NO compila — toma la imagen ya construida en DEV y la
+#   despliega en Staging usando el mismo SHA que fue validado en QA.
+#
+# Flujo:
+#   feature/* → develop → [ci-pipeline: build + deploy DEV]
+#                              ↓ PR (QA aprueba)
+#                             qa → [qa-pipeline: promote + deploy QA] ✅
+#                              ↓ PR (Líder QA decide)
+#                          staging → [staging-pipeline: promote + deploy Staging] ✅
+#
+# Trigger: push a la rama `staging` (via merge de PR qa → staging).
+#
+# Adapta las variables env para cada microservicio.
+
+name: Staging Pipeline - Promote & Deploy Staging
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-gke-staging-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: prj-sie-fin-financiero-stg
+  HUB_PROJECT_ID: prj-sie-sb-fin-common
+  HUB_PROJECT_NUM: "122174909048"
+  REGION: us-east1
+  GKE_CLUSTER: gke-sie-fin-financiero-stg
+  WORKER_POOL: projects/prj-sie-fin-financiero-stg/locations/us-east1/workerPools/financiero-pool
+  # --- Configurar por servicio ---
+  SERVICE_NAME: access-manager
+  NAMESPACE: access-manager
+  DEPLOY_API: true
+  DEPLOY_MFE: true
+  HEALTH_PATH: /health/live   # access-manager usa /health; el resto usa /health/live
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read   # para consultar runs de qa-pipeline.yml via gh CLI
+
+jobs:
+  # ─── Gate: validar origen y obtener el SHA de la imagen QA ──────────────────
+  validate-and-resolve:
+    name: Validar origen — qa incluido y QA verde
+    runs-on: ubuntu-latest
+    outputs:
+      image_sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: qa está incluido en staging
+        run: |
+          git fetch origin qa
+          if ! git merge-base --is-ancestor origin/qa HEAD; then
+            echo "::error::La rama staging no contiene todos los commits de qa."
+            echo "Solución: git checkout staging && git merge qa && git push"
+            exit 1
+          fi
+          echo "✅ qa está incluido en staging"
+
+      - name: Obtener SHA del último deploy exitoso en QA
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Obtenemos el SHA del último QA pipeline exitoso — esa es la imagen validada en QA.
+          # El QA pipeline a su vez tomó esa imagen del último CI pipeline exitoso en develop.
+          # Resultado: staging despliega exactamente lo que fue validado en QA.
+          QA_RUN=$(gh run list \
+            --workflow=qa-pipeline.yml \
+            --branch=qa \
+            --status=success \
+            --limit=1 \
+            --json headSha,conclusion,createdAt \
+            --jq '.[0]')
+
+          QA_CONCLUSION=$(echo "$QA_RUN" | jq -r '.conclusion')
+          QA_SHA=$(echo "$QA_RUN" | jq -r '.headSha')
+          QA_DATE=$(echo "$QA_RUN" | jq -r '.createdAt')
+
+          if [ "$QA_CONCLUSION" != "success" ] || [ -z "$QA_SHA" ]; then
+            echo "::error::No se encontró un deploy exitoso en QA."
+            echo "Verificar que qa-pipeline.yml haya pasado en la rama qa antes de promover a staging."
+            exit 1
+          fi
+
+          # El SHA de imagen es el del último CI pipeline exitoso en develop
+          # (que es lo que realmente fue desplegado en QA con ese QA_SHA)
+          CI_RUN=$(gh run list \
+            --workflow=ci-pipeline.yml \
+            --branch=develop \
+            --status=success \
+            --limit=1 \
+            --json headSha,conclusion,createdAt \
+            --jq '.[0]')
+
+          SHA=$(echo "$CI_RUN" | jq -r '.headSha')
+          DATE=$(echo "$CI_RUN" | jq -r '.createdAt')
+
+          if [ -z "$SHA" ]; then
+            echo "::error::No se pudo obtener el SHA de imagen desde ci-pipeline."
+            exit 1
+          fi
+
+          echo "✅ QA verde (deploy: $QA_DATE)"
+          echo "✅ Imagen a promover — SHA: $SHA (build: $DATE)"
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      - name: Verificar que las imágenes existen en Artifact Registry
+        run: |
+          SHA=${{ steps.resolve.outputs.sha }}
+          BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.HUB_PROJECT_ID }}/art-fin-shared/${{ env.SERVICE_NAME }}"
+          echo "Imagen a desplegar:"
+          if [ "${{ env.DEPLOY_API }}" = "true" ]; then
+            echo "  API: ${BASE}/${{ env.SERVICE_NAME }}-api:${SHA}"
+          fi
+          if [ "${{ env.DEPLOY_MFE }}" = "true" ]; then
+            echo "  MFE: ${BASE}/${{ env.SERVICE_NAME }}-mfe:${SHA}"
+          fi
+
+  # ─── Deploy: promueve la imagen QA al cluster Staging ───────────────────────
+  deploy-staging:
+    name: Deploy Staging
+    runs-on: ubuntu-latest
+    needs: validate-and-resolve
+    environment: staging
+    env:
+      IMAGE_SHA: ${{ needs.validate-and-resolve.outputs.image_sha }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/${{ env.HUB_PROJECT_NUM }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: sa-sie-fin-${{ env.SERVICE_NAME }}-cicd@${{ env.HUB_PROJECT_ID }}.iam.gserviceaccount.com
+
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Deploy via Cloud Build Staging
+        run: |
+          cat > /tmp/deploy-staging.yaml <<'CBEOF'
+          steps:
+            - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+              entrypoint: 'bash'
+              args:
+                - '-c'
+                - |
+                  set -euo pipefail
+
+                  gke_update_with_retry() {
+                    local attempt=1 max=5 delay=20
+                    until gcloud container clusters update "$$@" 2>&1; do
+                      [ $$attempt -ge $$max ] && { echo "ERROR: cluster update falló tras $$max intentos"; return 1; }
+                      echo "  → Reintento $$attempt/$$max en $${delay}s..."
+                      sleep $$delay; delay=$$(($$delay * 2)); attempt=$$(($$attempt + 1))
+                    done
+                  }
+
+                  WORKER_IP=$$(curl -sf https://checkip.amazonaws.com)
+                  echo "Worker IP: $${WORKER_IP}"
+
+                  CURRENT_NETWORKS=$$(gcloud container clusters describe ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --format="value(masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock)")
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    AUTH_NETWORKS="$$(echo "$${CURRENT_NETWORKS}" | tr ';' ','),$${WORKER_IP}/32"
+                  else
+                    AUTH_NETWORKS="$${WORKER_IP}/32"
+                  fi
+
+                  gke_update_with_retry ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --enable-master-authorized-networks \
+                    --master-authorized-networks="$${AUTH_NETWORKS}" --quiet
+                  sleep 10
+
+                  gcloud container clusters get-credentials ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID}
+
+                  BASE="${_IMAGE_BASE}"
+
+                  if [ "${_DEPLOY_API}" = "true" ]; then
+                    kubectl set image deployment/${_SERVICE_NAME}-api \
+                      ${_SERVICE_NAME}-api=$${BASE}/${_SERVICE_NAME}-api:${_TAG} \
+                      -n ${_NAMESPACE}
+                    kubectl rollout status deployment/${_SERVICE_NAME}-api \
+                      -n ${_NAMESPACE} --timeout=300s
+                  fi
+
+                  if [ "${_DEPLOY_MFE}" = "true" ]; then
+                    kubectl set image deployment/${_SERVICE_NAME}-mfe \
+                      ${_SERVICE_NAME}-mfe=$${BASE}/${_SERVICE_NAME}-mfe:${_TAG} \
+                      -n ${_NAMESPACE}
+                    kubectl rollout status deployment/${_SERVICE_NAME}-mfe \
+                      -n ${_NAMESPACE} --timeout=180s
+                  fi
+
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    gke_update_with_retry ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --enable-master-authorized-networks \
+                      --master-authorized-networks="$$(echo "$${CURRENT_NETWORKS}" | tr ';' ',')" --quiet
+                  else
+                    gke_update_with_retry ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --no-enable-master-authorized-networks --quiet
+                  fi
+          substitutions:
+            _GKE_CLUSTER: placeholder
+            _REGION: placeholder
+            _PROJECT_ID: placeholder
+            _SERVICE_NAME: placeholder
+            _NAMESPACE: placeholder
+            _IMAGE_BASE: placeholder
+            _TAG: placeholder
+            _WORKER_POOL: placeholder
+            _DEPLOY_API: placeholder
+            _DEPLOY_MFE: placeholder
+          options:
+            pool:
+              name: ${_WORKER_POOL}
+          CBEOF
+
+          IMAGE_BASE="${{ env.REGION }}-docker.pkg.dev/${{ env.HUB_PROJECT_ID }}/art-fin-shared/${{ env.SERVICE_NAME }}"
+
+          BUILD_ID=$(gcloud builds submit --no-source \
+            --project=${{ env.PROJECT_ID }} \
+            --config=/tmp/deploy-staging.yaml \
+            --region=${{ env.REGION }} \
+            --substitutions=_GKE_CLUSTER=${{ env.GKE_CLUSTER }},_REGION=${{ env.REGION }},_PROJECT_ID=${{ env.PROJECT_ID }},_SERVICE_NAME=${{ env.SERVICE_NAME }},_NAMESPACE=${{ env.NAMESPACE }},_IMAGE_BASE=${IMAGE_BASE},_TAG=${{ env.IMAGE_SHA }},_WORKER_POOL=${{ env.WORKER_POOL }},_DEPLOY_API=${{ env.DEPLOY_API }},_DEPLOY_MFE=${{ env.DEPLOY_MFE }} \
+            --async --format='value(id)')
+
+          echo "Cloud Build ID: $BUILD_ID"
+          echo "SHA de imagen desplegada: ${{ env.IMAGE_SHA }}"
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" \
+              --project=${{ env.PROJECT_ID }} --region=${{ env.REGION }} \
+              --format='value(status)')
+            echo "  Status: $STATUS"
+            case "$STATUS" in
+              SUCCESS) echo "✅ Deploy Staging exitoso"; break ;;
+              FAILURE|TIMEOUT|CANCELLED|EXPIRED|INTERNAL_ERROR)
+                gcloud builds log "$BUILD_ID" \
+                  --project=${{ env.PROJECT_ID }} --region=${{ env.REGION }} 2>/dev/null || true
+                exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done
+
+      - name: Smoke test Staging
+        if: env.DEPLOY_API == 'true'
+        run: |
+          echo "Imagen desplegada: ${{ env.IMAGE_SHA }}"
+          DEADLINE=$((SECONDS+300))
+          while [ $SECONDS -lt $DEADLINE ]; do
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" \
+              https://finance-stg.siesacloud.dev/api/${{ env.SERVICE_NAME }}${{ env.HEALTH_PATH }})
+            [ "$STATUS" = "200" ] && { echo "✅ Smoke test Staging: HTTP $STATUS"; exit 0; }
+            echo "  HTTP $STATUS — reintentando en 15s..."
+            sleep 15
+          done
+          echo "::error::Smoke test Staging falló: timeout 5min"
+          exit 1

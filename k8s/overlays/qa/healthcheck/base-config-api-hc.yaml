@@ -1,0 +1,19 @@
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: base-config-api-hc
+  namespace: base-config
+spec:
+  default:
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+    config:
+      type: TCP
+      tcpHealthCheck:
+        port: 8080
+  targetRef:
+    group: ""
+    kind: Service
+    name: base-config-api

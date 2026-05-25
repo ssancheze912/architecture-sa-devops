@@ -1,0 +1,13 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+  namespace: app-shell
+spec:
+  type: pubsub.gcp.pubsub
+  version: v1
+  metadata:
+    - name: projectId
+      value: prj-sie-fin-financiero-qas
+    - name: disableEntityManagement
+      value: "true"

@@ -1,0 +1,235 @@
+# CI Pipeline - Build & Deploy to DEV
+# Ref CAF: Standard 16 - CI/CD and Automation (Phase 2: CI Pipeline)
+# VALIDADO: Dev test 2026-03-10 — Pipeline completo exitoso
+#
+# Patrón de deploy:
+#   1. GitHub Actions runner: docker build + push a Artifact Registry
+#   2. GitHub Actions runner: kustomize build → genera manifest.yaml con las imágenes fijas
+#   3. Cloud Build worker pool: kubectl apply manifest.yaml en GKE (via VPC peered)
+#
+# IMPORTANTE — GKE Master Authorized Networks:
+#   El cluster tiene Master Authorized Networks habilitado y gcpPublicCidrsAccessEnabled=false.
+#   El worker pool (financiero-pool) tiene PUBLIC_EGRESS y VPC peering NO es transitivo,
+#   por lo que NO puede alcanzar ni el endpoint privado ni el público directamente.
+#   Solución validada: el worker obtiene su IP pública, la agrega temporalmente a
+#   master-authorized-networks, despliega, y restaura la config original.
+#
+# Convención de ramas:
+#   develop → ambiente de desarrollo (dev)
+#   main    → producción (cuando exista)
+#
+# Adapta las variables env para cada microservicio.
+
+name: CI Pipeline - Build & Deploy DEV
+
+on:
+  push:
+    branches: [develop]
+
+# Previene deploys paralelos del mismo servicio para evitar la race condition
+# de CLUSTER_ALREADY_HAS_OPERATION en Master Authorized Networks.
+# cancel-in-progress: false → el deploy en cola espera; no cancela el activo.
+concurrency:
+  group: deploy-gke-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  # --- Proyecto GCP ---
+  # PROJECT_ID: Spoke — GKE cluster, Cloud Build worker pool.
+  # HUB_PROJECT_ID: Hub — WIF pool, CI/CD SAs, Artifact Registry art-fin-shared.
+  PROJECT_ID: prj-sie-fin-financiero-dev
+  HUB_PROJECT_ID: prj-sie-sb-fin-common
+  PROJECT_NUM: "122174909048"
+  REGION: us-east1
+  GKE_CLUSTER: gke-sie-fin-sandbox-dev
+  WORKER_POOL: projects/prj-sie-fin-financiero-dev/locations/us-east1/workerPools/financiero-pool
+  # --- Configurar por servicio ---
+  SERVICE_NAME: access-manager
+  NAMESPACE: access-manager
+  BUILD_API: true
+  BUILD_MFE: true
+  HEALTH_PATH: /health/live   # access-manager usa /health; el resto usa /health/live
+  # --- Ambiente frontend ---
+  # Debe coincidir con el vite_mode del project-config del ambiente destino.
+  # development: React con warnings activos (dev, dev)
+  # production:  React optimizado sin warnings (staging, prod)
+  VITE_MODE: development
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/${{ env.PROJECT_NUM }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: sa-sie-fin-${{ env.SERVICE_NAME }}-cicd@${{ env.HUB_PROJECT_ID }}.iam.gserviceaccount.com
+
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # --- Build & Push API ---
+      # Hub: us-east1-docker.pkg.dev/{HUB_PROJECT_ID}/art-fin-shared/{service}/{service}-api
+      - name: Build & Push API image
+        if: env.BUILD_API == 'true'
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.HUB_PROJECT_ID }}/art-fin-shared/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}-api"
+          docker build -t ${IMAGE}:${{ github.sha }} -f api/Dockerfile api/
+          docker push ${IMAGE}:${{ github.sha }}
+
+      # --- Build & Push MFE ---
+      - name: Build & Push MFE image
+        if: env.BUILD_MFE == 'true'
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.HUB_PROJECT_ID }}/art-fin-shared/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}-mfe"
+          docker build \
+            --build-arg VITE_MODE=${{ env.VITE_MODE }} \
+            -t ${IMAGE}:${{ github.sha }} \
+            -f mfe/Dockerfile mfe/
+          docker push ${IMAGE}:${{ github.sha }}
+
+      # --- Prepare deployment manifest ---
+      # Genera manifest.yaml con las imágenes exactas del SHA actual usando kustomize.
+      # NOTA: el overlay path (sandbox) puede variar por servicio — adaptar según corresponda
+      #       (ej: dev, sandbox, etc. según la estructura del overlay en k8s/overlays/).
+      - name: Prepare deployment manifest
+        run: |
+          curl -sLo /tmp/kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz"
+          tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin/
+          cd k8s/overlays/sandbox
+          kustomize edit set image \
+            "${{ env.SERVICE_NAME }}-api=${{ env.REGION }}-docker.pkg.dev/${{ env.HUB_PROJECT_ID }}/art-fin-shared/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}-api:${{ github.sha }}" \
+            "${{ env.SERVICE_NAME }}-mfe=${{ env.REGION }}-docker.pkg.dev/${{ env.HUB_PROJECT_ID }}/art-fin-shared/${{ env.SERVICE_NAME }}/${{ env.SERVICE_NAME }}-mfe:${{ github.sha }}"
+          kustomize build --load-restrictor LoadRestrictionsNone . > /tmp/manifest.yaml
+          echo "Images in manifest:"
+          grep "image:" /tmp/manifest.yaml
+          mkdir -p /tmp/k8s-deploy
+          cp /tmp/manifest.yaml /tmp/k8s-deploy/manifest.yaml
+
+      # --- Deploy via Cloud Build Worker Pool ---
+      # Cloud Build corre en el worker pool (VPC peered), usa IP dinámica
+      # para acceder al GKE master via endpoint público.
+      - name: Generate Cloud Build deploy config
+        run: |
+          cat > /tmp/deploy.yaml <<'CBEOF'
+          steps:
+            - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+              entrypoint: 'bash'
+              args:
+                - '-c'
+                - |
+                  set -euo pipefail
+
+                  # Helper: retry para manejar CLUSTER_ALREADY_HAS_OPERATION
+                  # cuando dos servicios despliegan concurrentemente al mismo cluster.
+                  gke_update_with_retry() {
+                    local attempt=1 max=5 delay=20
+                    until gcloud container clusters update "$$@" 2>&1; do
+                      [ $$attempt -ge $$max ] && { echo "ERROR: cluster update falló tras $$max intentos"; return 1; }
+                      echo "  → Reintento $$attempt/$$max en $${delay}s (CLUSTER_ALREADY_HAS_OPERATION)..."
+                      sleep $$delay
+                      delay=$$(($$delay * 2))
+                      attempt=$$(($$attempt + 1))
+                    done
+                  }
+
+                  # 1. Obtener IP pública del worker
+                  WORKER_IP=$$(curl -sf https://checkip.amazonaws.com)
+                  echo "Worker IP: $${WORKER_IP}"
+
+                  # 2. Guardar authorized networks actuales
+                  CURRENT_NETWORKS=$$(gcloud container clusters describe ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --format="value(masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock)")
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    AUTH_NETWORKS="$$(echo "$${CURRENT_NETWORKS}" | tr ';' ','),$${WORKER_IP}/32"
+                  else
+                    AUTH_NETWORKS="$${WORKER_IP}/32"
+                  fi
+
+                  # 3. Agregar IP del worker temporalmente
+                  gke_update_with_retry ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --enable-master-authorized-networks \
+                    --master-authorized-networks="$${AUTH_NETWORKS}" --quiet
+                  sleep 10
+
+                  # 4. Obtener credenciales y desplegar
+                  gcloud container clusters get-credentials ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID}
+
+                  kubectl apply -f /workspace/manifest.yaml
+                  kubectl rollout status deployment/${_SERVICE_NAME}-api -n ${_NAMESPACE} --timeout=180s
+                  kubectl rollout status deployment/${_SERVICE_NAME}-mfe -n ${_NAMESPACE} --timeout=120s
+
+                  # 5. Restaurar authorized networks originales
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    RESTORE_NETWORKS=$$(echo "$${CURRENT_NETWORKS}" | tr ';' ',')
+                    gke_update_with_retry ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --enable-master-authorized-networks \
+                      --master-authorized-networks="$${RESTORE_NETWORKS}" --quiet
+                  else
+                    gke_update_with_retry ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --no-enable-master-authorized-networks --quiet
+                  fi
+          substitutions:
+            _GKE_CLUSTER: placeholder
+            _REGION: placeholder
+            _PROJECT_ID: placeholder
+            _SERVICE_NAME: placeholder
+            _NAMESPACE: placeholder
+            _WORKER_POOL: placeholder
+          options:
+            pool:
+              name: ${_WORKER_POOL}
+          CBEOF
+
+      - name: Deploy via Cloud Build (dynamic GKE auth)
+        run: |
+          BUILD_ID=$(gcloud builds submit /tmp/k8s-deploy \
+            --config=/tmp/deploy.yaml \
+            --region=${{ env.REGION }} \
+            --substitutions=_GKE_CLUSTER=${{ env.GKE_CLUSTER }},_REGION=${{ env.REGION }},_PROJECT_ID=${{ env.PROJECT_ID }},_SERVICE_NAME=${{ env.SERVICE_NAME }},_NAMESPACE=${{ env.NAMESPACE }},_WORKER_POOL=${{ env.WORKER_POOL }} \
+            --async --format='value(id)')
+          echo "Cloud Build ID: $BUILD_ID"
+          echo "Waiting for build to complete..."
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" --region=${{ env.REGION }} --format='value(status)')
+            echo "  Status: $STATUS"
+            case "$STATUS" in
+              SUCCESS) echo "Build succeeded!"; break ;;
+              FAILURE|TIMEOUT|CANCELLED|EXPIRED|INTERNAL_ERROR)
+                echo "Build failed with status: $STATUS"
+                gcloud builds log "$BUILD_ID" --region=${{ env.REGION }} 2>/dev/null || true
+                exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done
+
+      # --- Smoke Test ---
+      # /api/{service}/health → Gateway reescribe a /health (regla específica antes del catch-all /api/v1)
+      # Retry loop 15s hasta 5 min para absorber NEG warmup y Dapr sidecar init.
+      - name: Smoke test
+        run: |
+          DEADLINE=$((SECONDS+300))
+          while [ $SECONDS -lt $DEADLINE ]; do
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" https://finance.siesacloud.dev/api/${{ env.SERVICE_NAME }}${{ env.HEALTH_PATH }})
+            [ "$STATUS" = "200" ] && { echo "Smoke test passed: HTTP $STATUS"; exit 0; }
+            echo "Smoke test: HTTP $STATUS — reintentando en 15s..."
+            sleep 15
+          done
+          echo "Smoke test failed: timeout 5min"
+          exit 1

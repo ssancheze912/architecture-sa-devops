@@ -1,0 +1,17 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: access-manager
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: dapr-redis.dapr-system.svc.cluster.local:6379
+    - name: enableTLS
+      value: "false"
+    - name: actorStateStore
+      # false es intencional: access-manager no usa Dapr Actors.
+      # Cambiar a true solo si se implementan actores en este servicio.
+      value: "false"

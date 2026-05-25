@@ -1,0 +1,30 @@
+# Dapr Configuration — Tracing con Jaeger via protocolo Zipkin
+#
+# Este archivo se aplica en AMBOS namespaces de servicios:
+#   kubectl apply -f dapr/tracing-config.yaml -n access-manager
+#   kubectl apply -f dapr/tracing-config.yaml -n segments
+#
+# Para que un pod use esta configuración, debe tener la anotación:
+#   dapr.io/config: "tracing-config"
+# en su spec.template.metadata.annotations (en el Deployment del repo de servicio).
+#
+# Flujo de trazas:
+#   app → dapr-sidecar → Zipkin exporter → otel-collector.observability:9411
+#       → filter/drop-pubsub-streamingpull-noise → jaeger.observability:9411 → Jaeger UI
+#
+# El OTel Collector filtra spans de StreamingPull de Pub/Sub que terminan en ERROR
+# por razones esperadas del protocolo (ciclo de vida normal, context canceled en shutdown).
+# Sin ese filtro, otelgrpc los marca como ERROR aunque no sean fallos reales.
+#
+# samplingRate "1" = 100% de requests trazados (apropiado para dev).
+# En producción bajar a "0.1" (10%) para reducir overhead.
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: tracing-config
+  # namespace: se sobreescribe al momento de aplicar (access-manager o segments)
+spec:
+  tracing:
+    samplingRate: "1"
+    zipkin:
+      endpointAddress: http://otel-collector.observability.svc.cluster.local:9411/api/v2/spans

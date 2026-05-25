@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  type: ClusterIP
+  selector:
+    app: otel-collector
+  ports:
+    - name: zipkin
+      port: 9411
+      targetPort: zipkin
+  # Dapr sidecars envían trazas aquí (Zipkin protocol).
+  # El collector filtra spans de StreamingPull esperados y reenvía el resto a Jaeger.
+  # Endpoint Dapr: http://otel-collector.observability.svc.cluster.local:9411/api/v2/spans

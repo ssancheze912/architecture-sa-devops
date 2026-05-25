@@ -1,0 +1,13 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: reconcile-users
+  namespace: segments
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    # Triggers POST /reconcile-users on segments-api every hour.
+    # Dapr binding name must match the registered route path (without leading slash).
+    - name: schedule
+      value: "@every 1h"

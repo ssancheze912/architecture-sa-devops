@@ -1,0 +1,18 @@
+# Componente Dapr pub/sub para desarrollo local
+# Apunta al mismo Cloud Pub/Sub del ambiente dev compartido.
+# Auth: Application Default Credentials (gcloud auth application-default login)
+#
+# Prerequisito: tener roles/pubsub.publisher + roles/pubsub.subscriber en el proyecto GCP.
+# Copiar a: ~/.dapr/components/pubsub.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+spec:
+  type: pubsub.gcp.pubsub
+  version: v1
+  metadata:
+    - name: projectId
+      value: prj-sie-fin-financiero-dev
+    - name: disableEntityManagement
+      value: "true"

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dapr-redis
+  namespace: dapr-system
+  labels:
+    app: dapr-redis
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/part-of: financiero-platform
+spec:
+  selector:
+    app: dapr-redis
+  ports:
+    - port: 6379
+      targetPort: 6379

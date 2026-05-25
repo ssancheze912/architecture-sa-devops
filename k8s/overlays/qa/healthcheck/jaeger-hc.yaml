@@ -1,0 +1,19 @@
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: jaeger-hc
+  namespace: observability
+spec:
+  default:
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+    config:
+      type: TCP
+      tcpHealthCheck:
+        port: 16686
+  targetRef:
+    group: ""
+    kind: Service
+    name: jaeger

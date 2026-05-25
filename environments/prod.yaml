@@ -1,0 +1,164 @@
+# ============================================================================
+# Configuración centralizada — Ambiente Producción
+# ============================================================================
+# ADVERTENCIA: cambios aquí disparan terraform apply en producción.
+# Todo PR requiere aprobación de mínimo 2 revisores.
+#
+# DIFERENCIAS CLAVE vs dev/staging:
+#   - availability: REGIONAL (Cloud SQL HA obligatorio)
+#   - edition: ENTERPRISE_PLUS (PITR + mejor performance)
+#   - release_channel: STABLE (GKE)
+#   - redis: migrar a Cloud Memorystore antes del go-live
+#   - vite_mode: production
+#
+# PASOS ANTES DE USAR:
+#   1. Crear proyecto GCP prj-sie-fin-financiero-prod
+#   2. Ejecutar terraform/bootstrap/ con el nuevo project_id
+#   3. Completar TODOS los <PLACEHOLDER>
+#   4. Crear terraform/environments/prod/main.tf (copiar dev/main.tf,
+#      cambiar backend prefix y path del config a environments/prod.yaml)
+#   5. Crear k8s/overlays/prod/ (copiar overlays/dev/, actualizar valores)
+#   6. Crear .github/workflows/infra-pipeline-prod.yml con required reviews
+#   7. Habilitar branch protection en main con required reviews = 2
+# ============================================================================
+
+gcp:
+  project_id: <PLACEHOLDER: prj-sie-fin-financiero-prod>
+  project_number: "<PLACEHOLDER>"
+  region: us-east1
+
+naming:
+  business_unit: financiero
+  product_suite: fin
+  environment: prod
+
+environment_suffix: prod
+
+frontend:
+  vite_mode: production
+
+gke:
+  cluster_name: <PLACEHOLDER: gke-sie-fin-financiero-prod>
+  network: "projects/prj-sie-com-vpc-host-prod/global/networks/vpc-sie-shared-prod"
+  subnetwork: "projects/prj-sie-com-vpc-host-prod/regions/us-east1/subnetworks/snt-sie-bus-fin-use1-prod"
+  release_channel: STABLE
+  master_cidr: "<PLACEHOLDER: /28 distinto a dev y stg, ej: 172.16.0.48/28>"
+  cluster_secondary_range_name: <PLACEHOLDER: pods-fin-use1-prod>
+  services_secondary_range_name: <PLACEHOLDER: svc-fin-use1-prod>
+
+database:
+  type: cloud-sql
+  engine: postgresql
+  version: "POSTGRES_18"
+  instance_name: <PLACEHOLDER: pgsql-fin-financiero-prod>
+  database_name: <PLACEHOLDER: finance-prod>
+  tier: <PLACEHOLDER: db-custom-2-7680>  # ajustar según carga real
+  availability: REGIONAL
+  edition: ENTERPRISE_PLUS
+  private_network: "projects/prj-sie-com-vpc-host-prod/global/networks/vpc-sie-shared-prod"
+
+dns:
+  zone_name: <PLACEHOLDER: siesacloud-prod>
+  dns_name: "<PLACEHOLDER: siesacloud.com.>"
+  domain: <PLACEHOLDER: finance.siesacloud.com>
+
+gateway:
+  name: financiero-prod-gateway
+  namespace: gateway-infra
+  class: gke-l7-global-external-managed
+  cert_map: <PLACEHOLDER: finance-siesacloud-prod-map>
+  external_ip: null  # completar tras primer terraform apply
+
+certificate:
+  name: <PLACEHOLDER: finance-siesacloud-prod-cert>
+
+namespaces:
+  - gateway-infra
+  - app-shell
+  - access-manager
+  - segments
+  - base-config
+  - third-party
+  - accounting
+  - liquid-tax
+  - observability
+
+services:
+  access-manager:
+    sa_name: sa-sie-fin-accmgr-cicd
+    github_repo: SiesaTeams/business-access-manager
+    description: "Docker images for access-manager service"
+  app-shell:
+    sa_name: sa-sie-fin-appshell-cicd
+    github_repo: SiesaTeams/business-financiero-app-shell
+    description: "Docker images for app-shell SPA"
+  segments:
+    sa_name: sa-sie-fin-segments-cicd
+    github_repo: SiesaTeams/business-financiero-segments-service
+    description: "Docker images for segments service"
+  base-config:
+    sa_name: sa-sie-fin-baseconfig-cicd
+    github_repo: SiesaTeams/business-financiero-base-config
+    description: "Docker images for base-config service"
+  third-party:
+    sa_name: sa-sie-fin-tprt-cicd
+    github_repo: SiesaTeams/business-financiero-third-party-service
+    description: "Docker images for third-party service"
+  accounting:
+    sa_name: sa-sie-fin-acct-cicd
+    github_repo: SiesaTeams/business-financiero-accounting-service
+    description: "Docker images for accounting service"
+  liquid-tax:
+    sa_name: sa-sie-fin-liquid-tax-cicd
+    github_repo: SiesaTeams/business-financiero-liquid-tax-service
+    description: "Docker images for liquid-tax service"
+
+deploy:
+  sa_name: <PLACEHOLDER: sa-sie-fin-prod-cicd>
+  github_repo: SiesaTeams/business-financiero-deploy
+  roles:
+    - roles/container.admin
+    - roles/compute.securityAdmin
+    - roles/compute.viewer
+    - roles/artifactregistry.admin
+    - roles/cloudsql.admin
+    - roles/dns.admin
+    - roles/iam.serviceAccountAdmin
+    - roles/secretmanager.admin
+    - roles/pubsub.admin
+    - roles/storage.admin
+    - roles/resourcemanager.projectIamAdmin
+    - roles/cloudbuild.builds.editor
+    - roles/cloudbuild.workerPoolUser
+    - roles/certificatemanager.editor
+
+wif:
+  pool_name: github-actions
+  provider_id: github
+
+cloud_build:
+  worker_pool: projects/<PLACEHOLDER: prj-sie-fin-financiero-prod>/locations/us-east1/workerPools/financiero-pool
+
+redis:
+  image: "redis:8-alpine"  # ACCIÓN REQUERIDA: migrar a Cloud Memorystore antes del go-live
+  namespace: dapr-system
+  service_name: dapr-redis
+  port: 6379
+  persistence:
+    enabled: true
+    storage_class: premium-rwo
+    storage_size: 5Gi
+
+dev_access:
+  admins_group: "<PLACEHOLDER: group:g-gcp-fld-sie-bus-financiero-prod-admins@siesacloud.com>"
+  devs_group: "<PLACEHOLDER: group:g-gcp-fld-sie-bus-financiero-prod-devs@siesacloud.com>"
+
+monitoring:
+  alert_email: "<PLACEHOLDER: alertas-produccion-financiero@siesa.com>"
+
+versions:
+  terraform: "1.14"
+  google_provider: "~> 7.0"
+  dotnet: "10.0.x"
+  node: "24"
+  pnpm: "10"

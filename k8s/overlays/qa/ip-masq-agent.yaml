@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ip-masq-agent
+  namespace: kube-system
+data:
+  config: |
+    nonMasqueradeCIDRs:
+      - 169.254.0.0/16
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+    masqLinkLocal: false
+    resyncInterval: 30s

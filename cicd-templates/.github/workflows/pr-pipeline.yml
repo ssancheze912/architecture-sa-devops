@@ -1,0 +1,71 @@
+# PR Pipeline - Quality Gate
+# Ref CAF: Standard 16 - CI/CD and Automation (Phase 1: PR Pipeline)
+# Copia esta plantilla al repo de cada microservicio
+
+name: PR Pipeline
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  quality-gate-backend:
+    name: Backend Quality Gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && hashFiles('**/*.csproj') != ''
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --warnaserror
+
+      - name: Test
+        run: dotnet test --no-build --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Format check
+        run: dotnet format --verify-no-changes
+
+  quality-gate-frontend:
+    name: Frontend Quality Gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && hashFiles('**/package.json') != ''
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm tsc --noEmit
+
+      - name: Test
+        run: pnpm test --run
+
+      - name: Build
+        run: pnpm build
