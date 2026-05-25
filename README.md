@@ -1,188 +1,185 @@
-# business-financiero-deploy
+# architecture-sa-devops
 
-Repositorio de infraestructura y despliegue de la plataforma financiera **Siesa Business** sobre GCP. Contiene IaC (Terraform), manifiestos Kubernetes, templates CI/CD y documentación operativa. No hay código fuente de aplicaciones aquí.
+Infrastructure and deployment workspace for the **Siesa Business** financial platform on GCP. Contains IaC (Terraform), Kubernetes manifests, CI/CD templates, and operational documentation. There is no application source code here — only the artifacts that deploy the apps.
+
+This repo is consumed by Siesa-Agents through the `/sa-init-devops` skill, which clones it into `_siesa-agents/devops/` so the DevOps skills (`/sa-aplicar`, `/sa-nuevo-servicio`, `/sa-auditar-servicio`, etc.) can operate against the deployment workspace they expect.
 
 ---
 
-## Arquitectura Hub-and-Spoke
+## Hub-and-Spoke Architecture
 
-La plataforma sigue el modelo Hub-and-Spoke de GCP:
+The platform follows GCP's Hub-and-Spoke model:
 
 ```
 Hub (prj-sie-sb-fin-common)
-  └── Artifact Registry  ← imágenes Docker construidas UNA vez por GH Actions
-         ↓ pull (mismo SHA, sin rebuild)
+  └── Artifact Registry  ← Docker images built ONCE by GH Actions
+         ↓ pull (same SHA, no rebuild)
   ├── Spoke dev   prj-sie-fin-financiero-dev  → GKE + Cloud SQL + Pub/Sub
-  ├── Spoke QA    prj-sie-fin-financiero-qa   → (próximo)
-  └── Spoke PROD  prj-sie-fin-financiero-prod → (próximo)
+  ├── Spoke QA    prj-sie-fin-financiero-qa   → (upcoming)
+  └── Spoke PROD  prj-sie-fin-financiero-prod → (upcoming)
 ```
 
-| Concepto | Descripción |
+| Concept | Description |
 |---|---|
-| **Hub** | Proyecto GCP central de la BU. Aloja Artifact Registry y recursos compartidos entre ambientes. |
-| **Spoke** | Proyecto GCP de un ambiente específico. Aloja GKE, Cloud SQL, secretos y cómputo. |
-| **Transversal** | Un dominio de negocio completo (`financiero`, `comercial`, etc.) con su propio Hub + Spokes. |
+| **Hub** | Central GCP project for the BU. Hosts Artifact Registry and resources shared across environments. |
+| **Spoke** | GCP project for a specific environment. Hosts GKE, Cloud SQL, secrets, and compute. |
+| **Transversal** | A complete business domain (`financiero`, `comercial`, etc.) with its own Hub + Spokes. |
 
 ---
 
-## Flujo de Despliegue CI/CD
+## CI/CD Deployment Flow
 
 ```
-PR → Quality Gate → Merge a develop
+PR → Quality Gate → Merge to develop
   │
   └── GitHub Actions (ci-pipeline.yml)
-        1. docker build API + MFE  (WIF, GITHUB_TOKEN para NuGet/npm)
-        2. docker push → Artifact Registry en Hub  ({sha} inmutable)
-        3. Cloud Build (cloudbuild-deploy.yaml, worker pool en Spoke)
-              ├── agrega IP temporal a Master Authorized Networks
+        1. docker build API + MFE  (WIF, GITHUB_TOKEN for NuGet/npm)
+        2. docker push → Artifact Registry in Hub  ({sha} immutable)
+        3. Cloud Build (cloudbuild-deploy.yaml, worker pool in Spoke)
+              ├── add temp IP to Master Authorized Networks
               ├── kubectl apply (kustomize overlays)
               ├── rollout status --timeout=300s
-              └── restaura Master Authorized Networks
+              └── restore Master Authorized Networks
 ```
 
-**Regla de oro:** una imagen por SHA. El mismo digest se promueve entre Spokes sin rebuild.
+**Golden rule:** one image per SHA. The same digest is promoted across Spokes without rebuilding.
 
 ---
 
-## Stack Técnico
+## Tech Stack
 
-| Capa | Tecnología |
+| Layer | Technology |
 |---|---|
-| Orquestación | GKE Autopilot — K8s 1.31, REGULAR channel |
-| Base de datos | Cloud SQL PostgreSQL v18 — una instancia por ambiente, BD única por BU, schemas por servicio |
-| Registry | Artifact Registry — Hub project, 1 repo Docker por servicio |
-| Gateway | GKE Gateway API v1 — L7 externo, HTTPS + HTTP redirect, Cloud Armor WAF |
+| Orchestration | GKE Autopilot — K8s 1.31, REGULAR channel |
+| Database | Cloud SQL PostgreSQL v18 — one instance per env, single DB per BU, schemas per service |
+| Registry | Artifact Registry — Hub project, 1 Docker repo per service |
+| Gateway | GKE Gateway API v1 — external L7, HTTPS + HTTP redirect, Cloud Armor WAF |
 | Service mesh | Dapr 1.17.3 — pub/sub, state, secrets, mTLS |
-| State store | Redis — StatefulSet en `dapr-system` |
-| Pub/Sub | Cloud Pub/Sub — `disableEntityManagement: true`, un topic por servicio |
+| State store | Redis — StatefulSet in `dapr-system` |
+| Pub/Sub | Cloud Pub/Sub — `disableEntityManagement: true`, one topic per service |
 | Secrets | GCP Secret Manager — Dapr component |
-| Observabilidad | Jaeger all-in-one v1.57 + OTel Collector 0.149.0 |
-| CI/CD | GitHub Actions + Cloud Build — WIF sin JSON keys |
-| IaC | Terraform 1.14 — `environments/{env}.yaml` como fuente de verdad |
+| Observability | Jaeger all-in-one v1.57 + OTel Collector 0.149.0 |
+| CI/CD | GitHub Actions + Cloud Build — WIF, no JSON keys |
+| IaC | Terraform 1.14 — `environments/{env}.yaml` as source of truth |
 
 ---
 
-## Estructura del Repositorio
+## Repository Structure
 
 ```
-business-financiero-deploy/
-├── environments/                  ← FUENTE DE VERDAD por ambiente
+architecture-sa-devops/
+├── environments/                  ← SOURCE OF TRUTH per environment
 │   ├── shared.yaml               ← Hub project (AR), WIF, SAs, Worker Pool
-│   ├── dev.yaml                  ← Ambiente dev activo
+│   ├── dev.yaml                  ← Active dev environment
 │   ├── staging.yaml              ← Template
 │   └── prod.yaml                 ← Template
 ├── terraform/
-│   ├── bootstrap/                ← Primer setup del proyecto GCP
-│   ├── modules/                  ← Módulos genéricos reutilizables
+│   ├── bootstrap/                ← First-time GCP project setup
+│   ├── modules/                  ← Reusable generic modules
 │   └── environments/
-│       ├── shared/main.tf        ← Lee shared.yaml — nunca destruir
-│       └── dev/main.tf           ← Lee dev.yaml
+│       ├── shared/main.tf        ← Reads shared.yaml — never destroy
+│       └── dev/main.tf           ← Reads dev.yaml
 ├── k8s/
-│   ├── base/                     ← Recursos genéricos (Dapr, Redis, Jaeger)
-│   └── overlays/dev/             ← Recursos específicos del ambiente
-│       ├── dapr/                 ← Components Dapr por servicio
-│       ├── routes/               ← HTTPRoutes del Gateway
-│       ├── healthcheck/          ← HealthCheckPolicies por servicio
-│       └── import-map/           ← Import map de MFEs
+│   ├── base/                     ← Generic resources (Dapr, Redis, Jaeger)
+│   └── overlays/dev/             ← Environment-specific resources
+│       ├── dapr/                 ← Dapr components per service
+│       ├── routes/               ← Gateway HTTPRoutes
+│       ├── healthcheck/          ← HealthCheckPolicies per service
+│       └── import-map/           ← MFE import map
 ├── cicd-templates/
 │   └── .github/workflows/
-│       └── ci-pipeline.yml       ← Template copiado a cada repo de servicio
+│       └── ci-pipeline.yml       ← Template copied into each service repo
 ├── scripts/
-│   ├── dev-connect.sh            ← Conexión local a Cloud SQL
-│   └── dapr-local/               ← Configuración Dapr in-memory para dev local
+│   ├── dev-connect.sh            ← Local Cloud SQL connection
+│   └── dapr-local/               ← In-memory Dapr config for local dev
 ├── docs/
-│   ├── troubleshooting.md        ← Problemas conocidos y soluciones
-│   ├── tech-debt.md              ← Deuda técnica y decisiones pendientes
-│   ├── developer-guide.md        ← Setup local, puertos, credenciales
-│   ├── onboarding.md             ← Primer día en el proyecto
-│   ├── mfe-conventions.md        ← Convenciones de MFEs (routing, build, i18n)
-│   ├── architecture-presentation.md ← Diagramas Mermaid de la arquitectura
-│   └── devops-org/               ← Skills SRE de referencia organizacional
-│       ├── ip-plan.md            ← Plan de IPs Hub-and-Spoke (fuente de verdad)
+│   ├── troubleshooting.md        ← Known issues and fixes
+│   ├── tech-debt.md              ← Tech debt and pending decisions
+│   ├── developer-guide.md        ← Local setup, ports, credentials
+│   ├── onboarding.md             ← Day one in the project
+│   ├── mfe-conventions.md        ← MFE conventions (routing, build, i18n)
+│   ├── architecture-presentation.md ← Mermaid architecture diagrams
+│   └── devops-org/               ← Organizational SRE reference skills
+│       ├── ip-plan.md            ← Hub-and-Spoke IP plan (source of truth)
 │       ├── sre-skill-iac-sentinel.md
 │       └── sre-skill-cicd-architect.md
-└── .claude/commands/             ← Slash commands para Claude Code
-    ├── flow-nueva-transversal.md
-    ├── flow-nuevo-servicio.md
-    ├── flow-nuevo-ambiente.md
-    ├── flow-aplicar.md
-    ├── flow-onboard-db.md
-    ├── flow-registrar-permisos.md
-    ├── flow-auditar-servicio.md
-    └── agent-sre-sentinel.md
+├── CLAUDE.md                     ← Project context for Claude Code
+└── README.md                     ← This file
 ```
+
+> **Note:** the original `business-financiero-deploy` repo carried a `.claude/commands/` folder with the DevOps slash commands. Those commands have been migrated to Siesa-Agents as Claude Code skills under `.claude/skills/sa-*/` (see "Claude Code skills" below) and are no longer present in this repo. GitHub Actions workflows (originally under `.github/workflows/`) also live in Siesa-Agents now, because GitHub only fires workflows from the repository they belong to.
 
 ---
 
-## Flows y Agentes (Claude Code)
+## Claude Code skills
 
-Este repositorio usa **Claude Code** con slash commands para automatizar operaciones repetitivas. Convención: `/flow-*` genera artefactos, `/agent-*` revisa y valida.
+The DevOps automation that used to live in `.claude/commands/` has been promoted to Claude Code **skills** in the Siesa-Agents project. Convention: `/sa-*` skills generate or operate, with the SRE Sentinel reviewing first.
 
-### Flujo recomendado
+### Recommended flow
 
 ```
-/agent-sre-sentinel {modo} {args}     ← 1. Valida primero
-        ↓  ✅ APROBADO
-/flow-{modo} {args}                   ← 2. Genera los artefactos
+/sa-agent-sre-sentinel {mode} {args}     ← 1. Validate first
+        ↓  ✅ APPROVED
+/sa-{mode} {args}                        ← 2. Generate the artifacts
         ↓
-/flow-aplicar                         ← 3. Commit + push + monitoreo del pipeline
+/sa-aplicar                              ← 3. Commit + push + pipeline monitoring
 ```
 
-### Flows disponibles
+### Available skills
 
-| Comando | Propósito |
+| Skill | Purpose |
 |---|---|
-| `/flow-nueva-transversal {nombre} {suite} {project-id}` | Scaffolding completo para un nuevo repo `business-{nombre}-deploy` |
-| `/flow-nuevo-servicio {nombre} {api-port} {mfe-port} [--no-mfe]` | Agrega un microservicio: Dapr, K8s routes, healthcheck, CI pipeline |
-| `/flow-nuevo-ambiente {staging\|prod}` | Genera `environments/{ambiente}.yaml` desde el template |
-| `/flow-aplicar` | Valida, commit con formato convencional, push a main y monitorea el pipeline. Si falla: diagnostica y repara o escala |
-| `/flow-onboard-db {schema} {owner-role}` | DDL de GRANTs para habilitar el usuario `dev` en un schema PostgreSQL nuevo |
-| `/flow-registrar-permisos {servicio} {prefijo} {entidad...}` | Genera el `curl` de registro de permisos en access-manager |
-| `/flow-auditar-servicio {nombre} [--no-mfe]` | Audita artefactos y CI/CD de un servicio — detecta gaps y ofrece corregirlos |
+| `/sa-nueva-transversal {name} {suite} {project-id}` | Full scaffolding for a new `business-{name}-deploy` repo |
+| `/sa-nuevo-servicio {name} {api-port} {mfe-port} [--no-mfe]` | Adds a microservice: Dapr, K8s routes, healthcheck, CI pipeline |
+| `/sa-nuevo-ambiente {staging\|prod}` | Generates `environments/{env}.yaml` from the template |
+| `/sa-aplicar` | Validates, commits with conventional format, pushes to main, and monitors the pipeline. On failure: diagnoses and repairs, or escalates |
+| `/sa-onboard-db {schema} {owner-role}` | DDL GRANTs to enable the `dev` user on a new PostgreSQL schema |
+| `/sa-registrar-permisos {service} {prefix} {entity...}` | Generates the `curl` to register permissions in access-manager |
+| `/sa-auditar-servicio {name} [--no-mfe]` | Audits artifacts and CI/CD for a service — detects gaps and offers to fix them |
 
-### Agentes disponibles
+### Sentinel agent
 
-| Comando | Propósito |
+| Skill | Purpose |
 |---|---|
-| `/agent-sre-sentinel nueva-transversal {nombre} {suite} {project-id}` | Valida 7 guardrails: naming, Hub-First, IP overlap, Registry-First, AR en Hub, Host VPC, mandatory labels |
-| `/agent-sre-sentinel nuevo-servicio {nombre}` | Valida 7 guardrails: Production-Ready, API Guard, WI binding, AR en Hub, secret naming, immutable artifacts |
-| `/agent-sre-sentinel propuesta "{descripción}"` | Evalúa cualquier propuesta arquitectónica libre contra los principios SIESA |
+| `/sa-agent-sre-sentinel nueva-transversal {name} {suite} {project-id}` | Validates 7 guardrails: naming, Hub-First, IP overlap, Registry-First, AR in Hub, Host VPC, mandatory labels |
+| `/sa-agent-sre-sentinel nuevo-servicio {name}` | Validates 7 guardrails: Production-Ready, API Guard, WI binding, AR in Hub, secret naming, immutable artifacts |
+| `/sa-agent-sre-sentinel propuesta "{description}"` | Evaluates any free-form architectural proposal against SIESA principles |
 
-### Guardrails del Sentinel
+### Sentinel guardrails
 
-El agente bloquea (`❌ FAIL`) si detecta:
-- `PROJECT_ID` que no cumple `{type}-sie-{bu}-{workload}-{env}`
-- Spoke vending sin Hub project existente (Hub-First Mandate)
-- IP sin registrar en `ip-plan.md` antes de generar Terraform (Registry-First)
-- Modificación de recursos en Host VPC projects (`prj-sie-com-vpc-host-*`)
-- Secretos como variables de entorno planas
-- JSON keys en lugar de WIF
-- SystemJS en lugar de ESM nativo para MFEs
+The agent blocks (`❌ FAIL`) on:
+- A `PROJECT_ID` that does not match `{type}-sie-{bu}-{workload}-{env}`
+- Spoke vending without an existing Hub project (Hub-First Mandate)
+- IP not registered in `ip-plan.md` before generating Terraform (Registry-First)
+- Modification of resources in Host VPC projects (`prj-sie-com-vpc-host-*`)
+- Plain environment-variable secrets
+- JSON keys instead of WIF
+- SystemJS instead of native ESM for MFEs
 
 ---
 
-## Cloud SQL — Configuración por Ambiente
+## Cloud SQL — per-environment configuration
 
-Una instancia por ambiente, base de datos única por BU (`finance-{env}`), schemas separados por servicio.
+One instance per environment, single database per BU (`finance-{env}`), separate schemas per service.
 
-| Parámetro | Dev | Staging | Prod |
+| Parameter | Dev | Staging | Prod |
 |---|---|---|---|
-| Instancia | `pgsql-fin-sandbox-dev` | `pgsql-fin-financiero-stg` | TBD |
-| Base de datos | `finance-dev` | `finance-stg` | TBD |
+| Instance | `pgsql-fin-sandbox-dev` | `pgsql-fin-financiero-stg` | TBD |
+| Database | `finance-dev` | `finance-stg` | TBD |
 | Tier | `db-g1-small` | `db-g1-small` | TBD |
 | Availability | `ZONAL` | `REGIONAL` (HA) | `REGIONAL` (HA) |
-| Conectividad | IP pública + Auth Proxy sidecar | IP privada (Shared VPC) | IP privada (Shared VPC) |
+| Connectivity | Public IP + Auth Proxy sidecar | Private IP (Shared VPC) | Private IP (Shared VPC) |
 | Shared VPC host | `prj-sie-com-vpc-host-dev` | `prj-sie-com-vpc-host-stg` | `prj-sie-com-vpc-host-prod` |
 
-**Configuración del módulo (todos los ambientes):**
-- Backup: diario 04:00 UTC (11 PM COT), 7 copias, PITR 7 días WAL
-- Mantenimiento: domingo 06:00 UTC (1 AM COT), track `stable`
+**Module configuration (all environments):**
+- Backup: daily 04:00 UTC (11 PM COT), 7 copies, PITR 7 days WAL
+- Maintenance: Sunday 06:00 UTC (1 AM COT), `stable` track
 - Query logging: `log_min_duration_statement = 1000ms` (queries > 1s)
-- `deletion_protection = true` — no se puede eliminar la instancia accidentalmente
+- `deletion_protection = true` — the instance cannot be accidentally deleted
 
-**Schemas por servicio (BD única compartida):**
+**Schemas per service (shared single DB):**
 
-| Schema | Owner role | Servicio |
+| Schema | Owner role | Service |
 |---|---|---|
 | `access_manager` | `accmgr` | Access Manager |
 | `segment` | `segments` | Segments |
@@ -191,22 +188,22 @@ Una instancia por ambiente, base de datos única por BU (`finance-{env}`), schem
 | `acct` | `accounting` | Accounting |
 | `liquid_tax` | `liquid_tax` | Liquid Tax |
 
-**Conexión en dev:** Auth Proxy sidecar en cada pod → `127.0.0.1:5432`. `Maximum Pool Size=3`. Ver [`docs/developer-guide.md`](docs/developer-guide.md) para conexión local.
+**Dev connection:** Auth Proxy sidecar in each pod → `127.0.0.1:5432`. `Maximum Pool Size=3`. See [`docs/developer-guide.md`](docs/developer-guide.md) for local connection details.
 
-## Ambiente Activo
+## Active environment
 
-| Recurso | Valor |
+| Resource | Value |
 |---|---|
-| Proyecto GCP (Spoke dev) | `prj-sie-fin-financiero-dev` |
-| Hub project | `prj-sie-sb-fin-common` *(pendiente migración AR)* |
-| Cluster GKE | `gke-sie-fin-sandbox-dev` |
-| Cloud SQL | `pgsql-fin-sandbox-dev` — BD `finance-dev` |
-| Dominio | `finance.siesacloud.dev` |
-| Región | `us-east1` |
+| GCP project (Spoke dev) | `prj-sie-fin-financiero-dev` |
+| Hub project | `prj-sie-sb-fin-common` *(pending AR migration)* |
+| GKE cluster | `gke-sie-fin-sandbox-dev` |
+| Cloud SQL | `pgsql-fin-sandbox-dev` — DB `finance-dev` |
+| Domain | `finance.siesacloud.dev` |
+| Region | `us-east1` |
 
-### Servicios desplegados
+### Deployed services
 
-| Servicio | Namespace | Repo |
+| Service | Namespace | Repo |
 |---|---|---|
 | Access Manager | `access-manager` | `SiesaTeams/business-access-manager` |
 | App Shell | `app-shell` | `SiesaTeams/business-financiero-app-shell` |
@@ -218,73 +215,73 @@ Una instancia por ambiente, base de datos única por BU (`finance-{env}`), schem
 
 ---
 
-## Onboarding Rápido
+## Quick onboarding
 
-### Agregar un nuevo servicio
+### Add a new service
 
 ```bash
-# 1. Validar antes de actuar
-/agent-sre-sentinel nuevo-servicio treasury
+# 1. Validate before acting
+/sa-agent-sre-sentinel nuevo-servicio treasury
 
-# 2. Generar artefactos
-/flow-nuevo-servicio treasury 7022 8022
+# 2. Generate the artifacts
+/sa-nuevo-servicio treasury 7022 8022
 
-# 3. Onboardear la base de datos
-/flow-onboard-db treasury_schema treasury_owner
+# 3. Onboard the database
+/sa-onboard-db treasury_schema treasury_owner
 
-# 4. Registrar permisos en access-manager (tras primer deploy)
-/flow-registrar-permisos treasury trs treasury-accounts treasury-transactions
+# 4. Register permissions in access-manager (after the first deploy)
+/sa-registrar-permisos treasury trs treasury-accounts treasury-transactions
 ```
 
-### Agregar una nueva transversal
+### Add a new transversal
 
-> **Guía completa para principiantes:** [`docs/guia-principiantes.md`](docs/guia-principiantes.md)
+> **Full beginner's guide:** [`docs/guia-principiantes.md`](docs/guia-principiantes.md)
 
-El punto de partida es la rama `scaffold` de este repo — contiene solo el contenido genérico (módulos TF, k8s/base, scripts, flows) sin nada específico de financiero:
+The starting point is the `scaffold` branch of this repo — it contains only the generic content (TF modules, k8s/base, scripts, skills) without anything financial-specific:
 
 ```bash
-# 1. Hacer fork de SiesaTeams/business-financiero-deploy y cambiar a rama scaffold
+# 1. Fork SiesaTeams/architecture-sa-devops and switch to the scaffold branch
 git checkout scaffold
 
-# 2. Validar antes de generar (incluye IP plan y Hub project)
-/agent-sre-sentinel nueva-transversal comercial com prj-sie-com-comercial-dev
+# 2. Validate before generating (includes IP plan and Hub project)
+/sa-agent-sre-sentinel nueva-transversal comercial com prj-sie-com-comercial-dev
 
-# 3. Registrar CIDRs en docs/devops-org/ip-plan.md §3.1 y hacer commit
+# 3. Register CIDRs in docs/devops-org/ip-plan.md §3.1 and commit
 
-# 4. Generar todos los artefactos (environments, terraform, workflows)
-/flow-nueva-transversal comercial com prj-sie-com-comercial-dev
+# 4. Generate every artifact (environments, terraform, workflows)
+/sa-nueva-transversal comercial com prj-sie-com-comercial-dev
 ```
 
-### Setup local de desarrollo
+### Local development setup
 
-Ver [`docs/developer-guide.md`](docs/developer-guide.md) para:
-- Conexión a Cloud SQL via Auth Proxy (`scripts/dev-connect.sh`)
-- Puertos locales por servicio (API `70xx`, MFE `80xx`)
-- Credenciales y variables de entorno
-
----
-
-## Reglas Obligatorias
-
-1. **Terraform es la única fuente de verdad para infraestructura GCP.** Prohibido crear o modificar recursos manualmente. Todo cambio manual debe importarse al estado TF.
-
-2. **Cada cambio en este repo requiere actualizar `CLAUDE.md`, `.gemini/GEMINI.md` y `docs/troubleshooting.md`** si aplica. Sin actualización, los asistentes AI pierden contexto.
-
-3. **Host VPC Inviolability.** Nunca modificar recursos en `prj-sie-com-vpc-host-*`. Solo referenciar sus redes desde los Spokes.
-
-4. **Zero-Touch Secrets.** Ningún secreto como variable de entorno plana. Todo vía Secret Manager.
-
-5. **Immutable Artifacts.** Una imagen Docker por SHA. Nunca rebuild del mismo código para distintos ambientes — promover el digest.
+See [`docs/developer-guide.md`](docs/developer-guide.md) for:
+- Cloud SQL connection via Auth Proxy (`scripts/dev-connect.sh`)
+- Local ports per service (API `70xx`, MFE `80xx`)
+- Credentials and environment variables
 
 ---
 
-## Documentación
+## Mandatory rules
 
-| Doc | Contenido |
+1. **Terraform is the only source of truth for GCP infrastructure.** Manual creation or modification of resources is forbidden. Every manual change must be imported into TF state.
+
+2. **Every change in this repo requires updating `CLAUDE.md` and `docs/troubleshooting.md`** when applicable. Without these updates, AI assistants lose context. (`.gemini/GEMINI.md` from the original `business-financiero-deploy` repo is not mirrored here.)
+
+3. **Host VPC Inviolability.** Never modify resources in `prj-sie-com-vpc-host-*`. Only reference their networks from the Spokes.
+
+4. **Zero-Touch Secrets.** No secret as a plain environment variable. Everything via Secret Manager.
+
+5. **Immutable Artifacts.** One Docker image per SHA. Never rebuild the same code for different environments — promote the digest.
+
+---
+
+## Documentation
+
+| Doc | Content |
 |---|---|
-| [`CLAUDE.md`](CLAUDE.md) | Contexto completo del proyecto para Claude Code |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Problemas conocidos y soluciones |
-| [`docs/tech-debt.md`](docs/tech-debt.md) | Deuda técnica y decisiones pendientes |
-| [`docs/developer-guide.md`](docs/developer-guide.md) | Setup local y convenciones de desarrollo |
-| [`docs/mfe-conventions.md`](docs/mfe-conventions.md) | Routing, build y i18n de MFEs |
-| [`docs/devops-org/ip-plan.md`](docs/devops-org/ip-plan.md) | Plan de IPs Hub-and-Spoke — fuente de verdad |
+| [`CLAUDE.md`](CLAUDE.md) | Full project context for Claude Code |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Known issues and fixes |
+| [`docs/tech-debt.md`](docs/tech-debt.md) | Tech debt and pending decisions |
+| [`docs/developer-guide.md`](docs/developer-guide.md) | Local setup and development conventions |
+| [`docs/mfe-conventions.md`](docs/mfe-conventions.md) | MFE routing, build, and i18n |
+| [`docs/devops-org/ip-plan.md`](docs/devops-org/ip-plan.md) | Hub-and-Spoke IP plan — source of truth |
