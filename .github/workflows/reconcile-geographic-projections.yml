@@ -1,0 +1,169 @@
+# Reconcile Geographic Projections — Manual Trigger
+# Forces reconciliation of CountryPrj, StatePrj, CityPrj, NeighborhoodPrj in segments
+# by calling the Dapr cron binding endpoints directly via kubectl port-forward.
+#
+# Run from GitHub Actions UI: Actions → Reconcile Geographic Projections → Run workflow
+
+name: Reconcile Geographic Projections
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  load-config:
+    name: Load Config
+    runs-on: ubuntu-latest
+    outputs:
+      project_id: ${{ steps.config.outputs.project_id }}
+      project_num: ${{ steps.config.outputs.project_num }}
+      region: ${{ steps.config.outputs.region }}
+      gke_cluster: ${{ steps.config.outputs.gke_cluster }}
+      worker_pool: ${{ steps.config.outputs.worker_pool }}
+      sa_email: ${{ steps.config.outputs.sa_email }}
+      wif_provider: ${{ steps.config.outputs.wif_provider }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse environments/dev.yaml
+        id: config
+        run: |
+          sudo snap install yq
+          PROJECT_ID=$(yq '.gcp.project_id' environments/dev.yaml)
+          PROJECT_NUM=$(yq '.gcp.project_number' environments/dev.yaml)
+          REGION=$(yq '.gcp.region' environments/dev.yaml)
+          GKE_CLUSTER=$(yq '.gke.cluster_name' environments/dev.yaml)
+          WORKER_POOL=$(yq '.cloud_build.worker_pool' environments/dev.yaml)
+          DEPLOY_SA=$(yq '.deploy.sa_name' environments/dev.yaml)
+          WIF_POOL=$(yq '.wif.pool_name' environments/dev.yaml)
+          WIF_PROVIDER=$(yq '.wif.provider_id' environments/dev.yaml)
+
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          echo "project_num=$PROJECT_NUM" >> $GITHUB_OUTPUT
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+          echo "gke_cluster=$GKE_CLUSTER" >> $GITHUB_OUTPUT
+          echo "worker_pool=$WORKER_POOL" >> $GITHUB_OUTPUT
+          echo "sa_email=${DEPLOY_SA}@${PROJECT_ID}.iam.gserviceaccount.com" >> $GITHUB_OUTPUT
+          echo "wif_provider=projects/${PROJECT_NUM}/locations/global/workloadIdentityPools/${WIF_POOL}/providers/${WIF_PROVIDER}" >> $GITHUB_OUTPUT
+
+  reconcile:
+    name: Force Reconciliation
+    runs-on: ubuntu-latest
+    needs: [load-config]
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ needs.load-config.outputs.wif_provider }}
+          service_account: ${{ needs.load-config.outputs.sa_email }}
+
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Run reconciliation via Cloud Build
+        run: |
+          cat > /tmp/reconcile.yaml <<'CBEOF'
+          steps:
+            - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+              entrypoint: 'bash'
+              args:
+                - '-c'
+                - |
+                  set -euo pipefail
+
+                  # ── 1. Agregar IP del worker a Master Authorized Networks ──
+                  WORKER_IP=$$(curl -sf https://checkip.amazonaws.com)
+                  echo "Worker IP: $${WORKER_IP}"
+
+                  CURRENT_NETWORKS=$$(gcloud container clusters describe ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --format="value(masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock)" 2>/dev/null || echo "")
+
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    AUTH_NETWORKS="$$(echo "$${CURRENT_NETWORKS}" | tr ';' ','),$${WORKER_IP}/32"
+                  else
+                    AUTH_NETWORKS="$${WORKER_IP}/32"
+                  fi
+
+                  gcloud container clusters update ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --enable-master-authorized-networks \
+                    --master-authorized-networks="$${AUTH_NETWORKS}" --quiet
+                  sleep 10
+
+                  # ── 2. Obtener credenciales del cluster ──
+                  gcloud container clusters get-credentials ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID}
+
+                  # ── 3. Port-forward a segments-api ──
+                  echo "Starting port-forward to segments-api..."
+                  kubectl port-forward svc/segments-api 8080:8080 -n segments &
+                  PF_PID=$$!
+                  sleep 5
+
+                  # ── 4. Llamar los endpoints de reconciliación en orden ──
+                  ENDPOINTS="reconcile-countries reconcile-states reconcile-cities reconcile-neighborhoods"
+                  for ep in $${ENDPOINTS}; do
+                    echo ">>> Triggering POST /$${ep} ..."
+                    HTTP_STATUS=$$(curl -sf -o /tmp/$${ep}.json -w "%{http_code}" \
+                      -X POST http://localhost:8080/$${ep} \
+                      -H "Content-Type: application/json" || echo "000")
+                    echo "    Status: $${HTTP_STATUS}"
+                    if [ "$${HTTP_STATUS}" = "200" ]; then
+                      echo "    ✓ $${ep} OK"
+                    else
+                      echo "    ✗ $${ep} FAILED (status=$${HTTP_STATUS})"
+                      cat /tmp/$${ep}.json 2>/dev/null || true
+                    fi
+                    sleep 2
+                  done
+
+                  # ── 5. Detener port-forward ──
+                  kill $${PF_PID} 2>/dev/null || true
+
+                  # ── 6. Restaurar Master Authorized Networks ──
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    RESTORE_NETWORKS=$$(echo "$${CURRENT_NETWORKS}" | tr ';' ',')
+                    gcloud container clusters update ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --enable-master-authorized-networks \
+                      --master-authorized-networks="$${RESTORE_NETWORKS}" --quiet
+                  else
+                    gcloud container clusters update ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --no-enable-master-authorized-networks --quiet
+                  fi
+
+                  echo "=== Geographic reconciliation completed ==="
+          substitutions:
+            _GKE_CLUSTER: placeholder
+            _REGION: placeholder
+            _PROJECT_ID: placeholder
+          options:
+            pool:
+              name: ${_WORKER_POOL}
+          CBEOF
+
+          BUILD_ID=$(gcloud builds submit --no-source \
+            --config=/tmp/reconcile.yaml \
+            --region=${{ needs.load-config.outputs.region }} \
+            --substitutions=_GKE_CLUSTER=${{ needs.load-config.outputs.gke_cluster }},_REGION=${{ needs.load-config.outputs.region }},_PROJECT_ID=${{ needs.load-config.outputs.project_id }},_WORKER_POOL=${{ needs.load-config.outputs.worker_pool }} \
+            --async --format='value(id)')
+
+          echo "Cloud Build ID: $BUILD_ID"
+          echo "Waiting for build to complete..."
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" --region=${{ needs.load-config.outputs.region }} --format='value(status)')
+            echo "  Status: $STATUS"
+            case "$STATUS" in
+              SUCCESS) echo "Reconciliation completed successfully!"; break ;;
+              FAILURE|TIMEOUT|CANCELLED|EXPIRED|INTERNAL_ERROR)
+                echo "Build failed with status: $STATUS"
+                gcloud builds log "$BUILD_ID" --region=${{ needs.load-config.outputs.region }} 2>/dev/null || true
+                exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done

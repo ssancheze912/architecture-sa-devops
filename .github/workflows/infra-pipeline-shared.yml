@@ -1,0 +1,213 @@
+# Infrastructure Pipeline — Shared Resources
+# Ref CAF: Standard 14 - Infrastructure as Code, Standard 16 - CI/CD
+#
+# Gestiona los recursos GCP compartidos entre todos los ambientes:
+#   - Zona DNS, Artifact Registry, WIF pool, SAs de servicios, Worker Pool
+#
+# Se dispara cuando cambia la configuración de recursos compartidos.
+# NO gestiona recursos de ambiente específico (cluster, DB, gateway, certificados).
+#
+# SA de autenticación: sa-sie-fin-dev-cicd (ambiente principal)
+
+name: Infrastructure Pipeline — Shared
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/environments/shared/**'
+      - 'environments/shared.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/environments/shared/**'
+      - 'environments/shared.yaml'
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  # ─── Job 0: Leer configuración centralizada compartida ───
+  load-config:
+    name: Load Config
+    runs-on: ubuntu-latest
+    outputs:
+      project_id:  ${{ steps.config.outputs.project_id }}
+      project_num: ${{ steps.config.outputs.project_num }}
+      region:      ${{ steps.config.outputs.region }}
+      tf_version:  ${{ steps.config.outputs.tf_version }}
+      sa_email:    ${{ steps.config.outputs.sa_email }}
+      wif_provider: ${{ steps.config.outputs.wif_provider }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse environments/shared.yaml
+        id: config
+        run: |
+          sudo snap install yq
+          # Spoke DEV: project donde viven Cloud Build worker pool y DNS
+          PROJECT_ID=$(yq '.gcp.project_id' environments/shared.yaml)
+          PROJECT_NUM=$(yq '.gcp.project_number' environments/shared.yaml)
+          REGION=$(yq '.gcp.region' environments/shared.yaml)
+          TF_VERSION=$(yq '.versions.terraform' environments/shared.yaml)
+          # Hub: WIF pool + SAs CI/CD (migrado 2026-05-18)
+          HUB_PROJECT_ID=$(yq '.hub.project_id' environments/shared.yaml)
+          HUB_PROJECT_NUM=$(yq '.hub.project_number' environments/shared.yaml)
+          DEPLOY_SA=$(yq '.deploy.sa_name' environments/shared.yaml)
+          WIF_POOL=$(yq '.wif.pool_name' environments/shared.yaml)
+          WIF_PROVIDER=$(yq '.wif.provider_id' environments/shared.yaml)
+
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          echo "project_num=$PROJECT_NUM" >> $GITHUB_OUTPUT
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+          echo "tf_version=$TF_VERSION" >> $GITHUB_OUTPUT
+          echo "sa_email=${DEPLOY_SA}@${HUB_PROJECT_ID}.iam.gserviceaccount.com" >> $GITHUB_OUTPUT
+          echo "wif_provider=projects/${HUB_PROJECT_NUM}/locations/global/workloadIdentityPools/${WIF_POOL}/providers/${WIF_PROVIDER}" >> $GITHUB_OUTPUT
+
+  # ─── Job 1: Terraform Plan (solo PRs) ───
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: [load-config]
+    if: github.event_name == 'pull_request'
+    env:
+      WORKING_DIR: terraform/environments/shared
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check for terraform changes
+        id: tf-changes
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} \
+            -- terraform/environments/shared/ environments/shared.yaml || true)
+          echo "has_changes=$([ -n "$CHANGED" ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to GCP
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ needs.load-config.outputs.wif_provider }}
+          service_account: ${{ needs.load-config.outputs.sa_email }}
+
+      - uses: hashicorp/setup-terraform@v4
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        with:
+          terraform_version: ${{ needs.load-config.outputs.tf_version }}
+
+      - name: Terraform Init
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Validate
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        id: plan
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Comment PR with plan
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const plan = execSync('cd ${{ env.WORKING_DIR }} && terraform show -no-color tfplan').toString();
+            const planStatus = '${{ steps.plan.outcome }}';
+            const icon = planStatus === 'success' ? '✅' : '❌';
+
+            const body = `## ${icon} Terraform Plan — Shared Resources
+
+            <details><summary>Show plan output</summary>
+
+            \`\`\`
+            ${plan.substring(0, 60000)}
+            \`\`\`
+
+            </details>
+
+            **Status:** ${planStatus}
+            `;
+
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.data.find(c => c.body.includes('Terraform Plan — Shared Resources'));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body,
+              });
+            }
+
+      - name: Fail if plan failed
+        if: steps.tf-changes.outputs.has_changes == 'true' && steps.plan.outcome == 'failure'
+        run: exit 1
+
+  # ─── Job 2: Terraform Apply (merge a main o workflow_dispatch) ───
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: [load-config]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    env:
+      WORKING_DIR: terraform/environments/shared
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Check for terraform changes
+        id: tf-changes
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only HEAD~1 HEAD \
+            -- terraform/environments/shared/ environments/shared.yaml 2>/dev/null \
+            || git diff --name-only HEAD \
+            -- terraform/environments/shared/ environments/shared.yaml || true)
+          echo "has_changes=$([ -n "$CHANGED" ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Authenticate to GCP
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ needs.load-config.outputs.wif_provider }}
+          service_account: ${{ needs.load-config.outputs.sa_email }}
+
+      - uses: hashicorp/setup-terraform@v4
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        with:
+          terraform_version: ${{ needs.load-config.outputs.tf_version }}
+
+      - name: Terraform Init
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Apply
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform apply -auto-approve

@@ -1,8 +1,13 @@
 # architecture-sa-devops
 
-Infrastructure and deployment workspace for the **Siesa Business** financial platform on GCP. Contains IaC (Terraform), Kubernetes manifests, CI/CD templates, and operational documentation. There is no application source code here — only the artifacts that deploy the apps.
+Infrastructure and deployment workspace for the **Siesa Business** financial platform on GCP. Contains IaC (Terraform), Kubernetes manifests, CI/CD templates, GitHub Actions deploy workflows, Claude Code skills, and operational documentation. There is no application source code here — only the artifacts that deploy the apps.
 
-This repo is consumed by Siesa-Agents through the `/sa-init-devops` skill, which clones it into `_siesa-agents/devops/` so the DevOps skills (`/sa-aplicar`, `/sa-nuevo-servicio`, `/sa-auditar-servicio`, etc.) can operate against the deployment workspace they expect.
+This repo is consumed by Siesa-Agents through the `/sa-init-devops` skill, which:
+
+1. Clones this repo into `_siesa-agents/devops/`.
+2. Mirrors the tree (without `.git/`) into `siesa-agents/devops/`.
+3. Copies `.claude/skills/sa-*/SKILL.md` into the Siesa-Agents `.claude/skills/` so the DevOps skills (`/sa-aplicar`, `/sa-nuevo-servicio`, `/sa-auditar-servicio`, etc.) are immediately invocable.
+4. Copies `.github/workflows/*.yml` into the Siesa-Agents `.github/workflows/` for local visibility (these workflows continue to live in — and fire from — this repo, not Siesa-Agents).
 
 ---
 
@@ -103,11 +108,27 @@ architecture-sa-devops/
 │       ├── ip-plan.md            ← Hub-and-Spoke IP plan (source of truth)
 │       ├── sre-skill-iac-sentinel.md
 │       └── sre-skill-cicd-architect.md
+├── .claude/skills/               ← Claude Code skills, copied to Siesa-Agents at runtime
+│   ├── sa-agent-sre-sentinel/SKILL.md
+│   ├── sa-aplicar/SKILL.md
+│   ├── sa-auditar-servicio/SKILL.md
+│   ├── sa-nueva-transversal/SKILL.md
+│   ├── sa-nuevo-ambiente/SKILL.md
+│   ├── sa-nuevo-servicio/SKILL.md
+│   ├── sa-onboard-db/SKILL.md
+│   └── sa-registrar-permisos/SKILL.md
+├── .github/workflows/            ← GitHub Actions for the deploy pipelines
+│   ├── infra-pipeline-dev.yml
+│   ├── infra-pipeline-qa.yml
+│   ├── infra-pipeline-shared.yml
+│   └── reconcile-geographic-projections.yml
 ├── CLAUDE.md                     ← Project context for Claude Code
 └── README.md                     ← This file
 ```
 
-> **Note:** the original `business-financiero-deploy` repo carried a `.claude/commands/` folder with the DevOps slash commands. Those commands have been migrated to Siesa-Agents as Claude Code skills under `.claude/skills/sa-*/` (see "Claude Code skills" below) and are no longer present in this repo. GitHub Actions workflows (originally under `.github/workflows/`) also live in Siesa-Agents now, because GitHub only fires workflows from the repository they belong to.
+> **`.claude/skills/` vs the original `.claude/commands/`:** the source repo (`business-financiero-deploy`) shipped these as Claude Code slash commands under `.claude/commands/flow-*.md`. Here they are stored as proper Claude Code skills with YAML frontmatter and the `sa-` naming convention (so `/sa-init-devops` can copy them straight into Siesa-Agents `.claude/skills/` without any transformation).
+>
+> **`.github/workflows/` here vs in Siesa-Agents:** these workflows fire on activity to this repo. `/sa-init-devops` also drops a local copy into Siesa-Agents `.github/workflows/` for inspection, but those local copies are gitignored in Siesa-Agents and never fire there.
 
 ---
 

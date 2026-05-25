@@ -1,0 +1,500 @@
+# Infrastructure Pipeline — Dev
+# Ref CAF: Standard 14 - Infrastructure as Code, Standard 16 - CI/CD
+#
+# Pipeline paralelo al infra-pipeline.yml para el ambiente dev.
+# Misma estructura de 3 jobs pero apuntando a:
+#   - terraform/environments/dev/
+#   - environments/dev.yaml
+#   - k8s/base/ y k8s/overlays/dev/
+#
+# IMPORTANTE: Este pipeline NO se dispara con cambios exclusivos del ambiente dev.
+# El pipeline original (infra-pipeline.yml) NO se dispara con cambios exclusivos del dev.
+
+name: Infrastructure Pipeline — Dev
+
+on:
+  workflow_dispatch:  # Permite disparar manualmente desde GitHub Actions UI o CLI
+  pull_request:
+    branches: [main]
+    paths:
+      - 'terraform/environments/dev/**'
+      - 'terraform/modules/**'
+      - 'environments/dev.yaml'
+      - 'k8s/base/**'
+      - 'k8s/overlays/dev/**'
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/environments/dev/**'
+      - 'terraform/modules/**'
+      - 'environments/dev.yaml'
+      - 'k8s/base/**'
+      - 'k8s/overlays/dev/**'
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  # ─── Job 0: Leer configuración centralizada dev ───
+  load-config:
+    name: Load Config
+    runs-on: ubuntu-latest
+    outputs:
+      project_id: ${{ steps.config.outputs.project_id }}
+      project_num: ${{ steps.config.outputs.project_num }}
+      region: ${{ steps.config.outputs.region }}
+      gke_cluster: ${{ steps.config.outputs.gke_cluster }}
+      tf_version: ${{ steps.config.outputs.tf_version }}
+      worker_pool: ${{ steps.config.outputs.worker_pool }}
+      sa_email: ${{ steps.config.outputs.sa_email }}
+      wif_provider: ${{ steps.config.outputs.wif_provider }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Parse environments/dev.yaml
+        id: config
+        run: |
+          sudo snap install yq
+          # Spoke DEV: proyecto donde viven GKE, Cloud Build, Cloud SQL
+          PROJECT_ID=$(yq '.gcp.project_id' environments/dev.yaml)
+          PROJECT_NUM=$(yq '.gcp.project_number' environments/dev.yaml)
+          REGION=$(yq '.gcp.region' environments/dev.yaml)
+          GKE_CLUSTER=$(yq '.gke.cluster_name' environments/dev.yaml)
+          TF_VERSION=$(yq '.versions.terraform' environments/dev.yaml)
+          WORKER_POOL=$(yq '.cloud_build.worker_pool' environments/dev.yaml)
+          DEPLOY_SA=$(yq '.deploy.sa_name' environments/dev.yaml)
+          WIF_POOL=$(yq '.wif.pool_name' environments/dev.yaml)
+          WIF_PROVIDER=$(yq '.wif.provider_id' environments/dev.yaml)
+          # Hub: WIF pool + SA CI/CD (migrado 2026-05-18)
+          HUB_PROJECT_ID=$(yq '.hub.project_id' environments/shared.yaml)
+          HUB_PROJECT_NUM=$(yq '.hub.project_number' environments/shared.yaml)
+
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          echo "project_num=$PROJECT_NUM" >> $GITHUB_OUTPUT
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+          echo "gke_cluster=$GKE_CLUSTER" >> $GITHUB_OUTPUT
+          echo "tf_version=$TF_VERSION" >> $GITHUB_OUTPUT
+          echo "worker_pool=$WORKER_POOL" >> $GITHUB_OUTPUT
+          echo "sa_email=${DEPLOY_SA}@${HUB_PROJECT_ID}.iam.gserviceaccount.com" >> $GITHUB_OUTPUT
+          echo "wif_provider=projects/${HUB_PROJECT_NUM}/locations/global/workloadIdentityPools/${WIF_POOL}/providers/${WIF_PROVIDER}" >> $GITHUB_OUTPUT
+
+  # ─── Job 1: Terraform Plan (solo PRs con cambios en terraform/environments/dev/) ───
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: [load-config]
+    if: github.event_name == 'pull_request'
+    env:
+      WORKING_DIR: terraform/environments/dev
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check for terraform changes
+        id: tf-changes
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} -- terraform/environments/dev/ environments/dev.yaml || true)
+          if [ -n "$CHANGED" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Authenticate to GCP
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ needs.load-config.outputs.wif_provider }}
+          service_account: ${{ needs.load-config.outputs.sa_email }}
+
+      - uses: hashicorp/setup-terraform@v4
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        with:
+          terraform_version: ${{ needs.load-config.outputs.tf_version }}
+
+      - name: Terraform Init
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Validate
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        id: plan
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Comment PR with plan
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const plan = execSync('cd ${{ env.WORKING_DIR }} && terraform show -no-color tfplan').toString();
+            const planStatus = '${{ steps.plan.outcome }}';
+            const icon = planStatus === 'success' ? '✅' : '❌';
+
+            const body = `## ${icon} Terraform Plan — Dev
+
+            <details><summary>Show plan output</summary>
+
+            \`\`\`
+            ${plan.substring(0, 60000)}
+            \`\`\`
+
+            </details>
+
+            **Status:** ${planStatus}
+            `;
+
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.data.find(c => c.body.includes('Terraform Plan — Dev'));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body,
+              });
+            }
+
+      - name: Fail if plan failed
+        if: steps.tf-changes.outputs.has_changes == 'true' && steps.plan.outcome == 'failure'
+        run: exit 1
+
+  # ─── Job 2: Terraform Apply (merge a main con cambios en terraform/environments/dev/) ───
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: [load-config]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    env:
+      WORKING_DIR: terraform/environments/dev
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Check for terraform changes
+        id: tf-changes
+        run: |
+          # workflow_dispatch siempre aplica (ejecución manual forzada)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # fetch-depth: 2 garantiza que HEAD~1 existe; el fallback cubre el primer commit
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- terraform/environments/dev/ environments/dev.yaml 2>/dev/null \
+            || git diff --name-only HEAD -- terraform/environments/dev/ environments/dev.yaml || true)
+          if [ -n "$CHANGED" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Authenticate to GCP
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ needs.load-config.outputs.wif_provider }}
+          service_account: ${{ needs.load-config.outputs.sa_email }}
+
+      - uses: hashicorp/setup-terraform@v4
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        with:
+          terraform_version: ${{ needs.load-config.outputs.tf_version }}
+
+      - name: Terraform Init
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform State — Migrar prefix sandbox → dev (one-time)
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        env:
+          PROJECT_ID: ${{ needs.load-config.outputs.project_id }}
+        run: |
+          # One-time migration: si el state de dev está vacío pero sandbox tiene estado,
+          # copiar el state para preservar el tracking de recursos GCP existentes.
+          # Idempotente: si dev ya tiene state, este paso no hace nada.
+          BUCKET="bkt-sie-fin-iac-state-${PROJECT_ID}"
+          DEV_STATE="gs://${BUCKET}/terraform/environments/dev/default.tfstate"
+          SANDBOX_STATE="gs://${BUCKET}/terraform/environments/sandbox/default.tfstate"
+
+          DEV_EXISTS=$(gsutil -q stat "${DEV_STATE}" 2>/dev/null && echo "yes" || echo "no")
+          SANDBOX_EXISTS=$(gsutil -q stat "${SANDBOX_STATE}" 2>/dev/null && echo "yes" || echo "no")
+
+          if [ "${DEV_EXISTS}" = "no" ] && [ "${SANDBOX_EXISTS}" = "yes" ]; then
+            echo "State dev vacío, migrando desde sandbox..."
+            gsutil cp "${SANDBOX_STATE}" "${DEV_STATE}"
+            echo "State migrado exitosamente."
+          elif [ "${DEV_EXISTS}" = "yes" ]; then
+            echo "State dev ya existe — omitiendo migración."
+          else
+            echo "Sandbox state no encontrado — comenzando con state vacío."
+          fi
+
+      - name: Terraform State — Migrate renamed resources
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          # Migrar recursos renombrados en state antes de cualquier apply con -target.
+          # moved blocks son incompatibles con -target; state mv resuelve el rename
+          # sin destruir recursos GCP. Cada state mv es idempotente con || true.
+          terraform state mv \
+            "google_pubsub_topic.baseconfig_projection_events" \
+            "google_pubsub_topic.base_config_events" 2>/dev/null || true
+          terraform state mv \
+            'google_pubsub_subscription.segments_stub_subscriptions["segments-baseconfig-projection-events"]' \
+            'google_pubsub_subscription.segments_stub_subscriptions["segments-base-config-events"]' 2>/dev/null || true
+          terraform state mv \
+            "google_pubsub_topic.liquidtax_projection_events" \
+            "google_pubsub_topic.liquid_tax_events" 2>/dev/null || true
+          terraform state mv \
+            "google_pubsub_topic.thirdparty_projection_events" \
+            "google_pubsub_topic.third_party_events" 2>/dev/null || true
+          terraform state mv \
+            'google_pubsub_subscription.segments_stub_subscriptions["segments-liquidtax-projection-events"]' \
+            'google_pubsub_subscription.segments_stub_subscriptions["segments-liquid-tax-events"]' 2>/dev/null || true
+          terraform state mv \
+            'google_pubsub_subscription.segments_stub_subscriptions["segments-thirdparty-projection-events"]' \
+            'google_pubsub_subscription.segments_stub_subscriptions["segments-third-party-events"]' 2>/dev/null || true
+
+      - name: Terraform Apply — Pass 1 (GKE + Cloud SQL)
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          # Primer pass: crea solo el cluster GKE y Cloud SQL.
+          # Los recursos kubernetes (namespaces, gateway) requieren que el cluster
+          # esté activo para ser planificados — se aplican en el segundo pass.
+          terraform apply -auto-approve \
+            -target=module.gke \
+            -target=module.cloud_sql \
+            -target=data.google_service_account.sandbox_deploy
+
+      - name: Terraform Apply — Pass 2 (Namespaces + Gateway)
+        if: steps.tf-changes.outputs.has_changes == 'true'
+        env:
+          PROJECT_ID: ${{ needs.load-config.outputs.project_id }}
+          GKE_CLUSTER: ${{ needs.load-config.outputs.gke_cluster }}
+          REGION: ${{ needs.load-config.outputs.region }}
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          # Agregar IP del runner a Master Authorized Networks para que el
+          # kubernetes provider de Terraform pueda alcanzar el API server del cluster.
+          RUNNER_IP=$(curl -sf https://checkip.amazonaws.com)
+          echo "Runner IP: ${RUNNER_IP}"
+
+          CURRENT_NETWORKS=$(gcloud container clusters describe ${GKE_CLUSTER} \
+            --region=${REGION} --project=${PROJECT_ID} \
+            --format="value(masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock)" 2>/dev/null || echo "")
+
+          if [ -n "${CURRENT_NETWORKS}" ]; then
+            AUTH_NETWORKS="$(echo "${CURRENT_NETWORKS}" | tr ';' ','),${RUNNER_IP}/32"
+          else
+            AUTH_NETWORKS="${RUNNER_IP}/32"
+          fi
+
+          gcloud container clusters update ${GKE_CLUSTER} \
+            --region=${REGION} --project=${PROJECT_ID} \
+            --enable-master-authorized-networks \
+            --master-authorized-networks="${AUTH_NETWORKS}" --quiet
+          sleep 15
+
+          # Segundo pass: aplica namespaces y gateway.
+          # Terraform es idempotente — GKE y Cloud SQL se marcan como "no changes".
+          terraform apply -auto-approve
+
+          # Restaurar Master Authorized Networks al estado original
+          if [ -n "${CURRENT_NETWORKS}" ]; then
+            RESTORE_NETWORKS="$(echo "${CURRENT_NETWORKS}" | tr ';' ',')"
+            gcloud container clusters update ${GKE_CLUSTER} \
+              --region=${REGION} --project=${PROJECT_ID} \
+              --enable-master-authorized-networks \
+              --master-authorized-networks="${RESTORE_NETWORKS}" --quiet
+          else
+            gcloud container clusters update ${GKE_CLUSTER} \
+              --region=${REGION} --project=${PROJECT_ID} \
+              --no-enable-master-authorized-networks --quiet
+          fi
+
+  # ─── Job 3: K8s Manifests dev (merge a main con cambios en manifiestos) ───
+  k8s-manifests:
+    name: Apply K8s Manifests
+    runs-on: ubuntu-latest
+    needs: [load-config, terraform-apply]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Check for manifest changes
+        id: k8s-changes
+        run: |
+          # workflow_dispatch siempre aplica (ejecución manual forzada)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # fetch-depth: 2 garantiza que HEAD~1 existe; el fallback cubre el primer commit
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- k8s/ 2>/dev/null \
+            || git diff --name-only HEAD -- k8s/ || true)
+          if [ -n "$CHANGED" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Authenticate to GCP
+        if: steps.k8s-changes.outputs.has_changes == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ needs.load-config.outputs.wif_provider }}
+          service_account: ${{ needs.load-config.outputs.sa_email }}
+
+      - name: Setup Cloud SDK
+        if: steps.k8s-changes.outputs.has_changes == 'true'
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Deploy manifests via Cloud Build
+        if: steps.k8s-changes.outputs.has_changes == 'true'
+        run: |
+          cat > /tmp/k8s-deploy.yaml <<'CBEOF'
+          steps:
+            - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+              entrypoint: 'bash'
+              args:
+                - '-c'
+                - |
+                  set -euo pipefail
+
+                  WORKER_IP=$$(curl -sf https://checkip.amazonaws.com)
+                  echo "Worker IP: $${WORKER_IP}"
+
+                  CURRENT_NETWORKS=$$(gcloud container clusters describe ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --format="value(masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock)")
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    AUTH_NETWORKS="$$(echo "$${CURRENT_NETWORKS}" | tr ';' ','),$${WORKER_IP}/32"
+                  else
+                    AUTH_NETWORKS="$${WORKER_IP}/32"
+                  fi
+
+                  gcloud container clusters update ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID} \
+                    --enable-master-authorized-networks \
+                    --master-authorized-networks="$${AUTH_NETWORKS}" --quiet
+                  sleep 10
+
+                  gcloud container clusters get-credentials ${_GKE_CLUSTER} \
+                    --region=${_REGION} --project=${_PROJECT_ID}
+
+                  echo "=== Installing Dapr control plane (si no está instalado) ==="
+                  DAPR_VERSION="1.17.3"
+                  INSTALLED=$$(helm status dapr -n dapr-system --output json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['chart']['metadata']['version'])" 2>/dev/null || echo "none")
+                  if [ "$${INSTALLED}" = "$${DAPR_VERSION}" ]; then
+                    echo "Dapr $${DAPR_VERSION} ya está instalado — omitiendo."
+                  else
+                    echo "Instalando Dapr $${DAPR_VERSION} (instalado: $${INSTALLED})"
+                    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+                    helm repo add dapr https://dapr.github.io/helm-charts/ --force-update
+                    helm upgrade --install dapr dapr/dapr \
+                      --namespace dapr-system \
+                      --create-namespace \
+                      --version $${DAPR_VERSION} \
+                      --wait --timeout 5m
+                  fi
+
+                  echo "=== Migrando Redis: eliminando Deployment legacy si existe ==="
+                  kubectl delete deployment dapr-redis -n dapr-system --ignore-not-found=true
+                  echo "=== Applying base resources (Redis) ==="
+                  kubectl apply -f k8s/base/redis/
+
+                  echo "=== Applying Dapr tracing config (base) ==="
+                  for ns in access-manager segments base-config third-party accounting liquid-tax; do
+                    kubectl apply -f k8s/base/dapr/tracing-config.yaml -n $$ns || true
+                  done
+
+                  echo "=== Applying observability components (base) ==="
+                  kubectl apply -f k8s/base/observability/ --recursive || true
+
+                  echo "=== Applying Dapr components overlay (dev) ==="
+                  for dir in k8s/overlays/dev/dapr/*/; do
+                    if [ -d "$$dir" ]; then
+                      echo "  Applying $$dir"
+                      kubectl apply -f "$$dir"
+                    fi
+                  done
+
+                  echo "=== Applying routes (overlay dev) ==="
+                  kubectl apply -f k8s/overlays/dev/routes/ || true
+
+                  echo "=== Applying health checks (overlay dev) ==="
+                  kubectl apply -f k8s/overlays/dev/healthcheck/ || true
+
+                  echo "=== Applying import-map (overlay dev) ==="
+                  kubectl apply -f k8s/overlays/dev/import-map/ || true
+
+                  echo "=== All dev manifests applied ==="
+
+                  if [ -n "$${CURRENT_NETWORKS}" ]; then
+                    RESTORE_NETWORKS=$$(echo "$${CURRENT_NETWORKS}" | tr ';' ',')
+                    gcloud container clusters update ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --enable-master-authorized-networks \
+                      --master-authorized-networks="$${RESTORE_NETWORKS}" --quiet
+                  else
+                    # No había redes autorizadas: deshabilitar para restaurar el estado original
+                    gcloud container clusters update ${_GKE_CLUSTER} \
+                      --region=${_REGION} --project=${_PROJECT_ID} \
+                      --no-enable-master-authorized-networks --quiet
+                  fi
+          substitutions:
+            _GKE_CLUSTER: placeholder
+            _REGION: placeholder
+            _PROJECT_ID: placeholder
+          options:
+            pool:
+              name: ${_WORKER_POOL}
+          CBEOF
+
+          tar czf /tmp/manifests.tar.gz k8s/
+
+          BUILD_ID=$(gcloud builds submit /tmp/manifests.tar.gz \
+            --config=/tmp/k8s-deploy.yaml \
+            --region=${{ needs.load-config.outputs.region }} \
+            --substitutions=_GKE_CLUSTER=${{ needs.load-config.outputs.gke_cluster }},_REGION=${{ needs.load-config.outputs.region }},_PROJECT_ID=${{ needs.load-config.outputs.project_id }},_WORKER_POOL=${{ needs.load-config.outputs.worker_pool }} \
+            --async --format='value(id)')
+          echo "Cloud Build ID: $BUILD_ID"
+          echo "Waiting for build to complete..."
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" --region=${{ needs.load-config.outputs.region }} --format='value(status)')
+            echo "  Status: $STATUS"
+            case "$STATUS" in
+              SUCCESS) echo "Dev K8s manifests deployed successfully!"; break ;;
+              FAILURE|TIMEOUT|CANCELLED|EXPIRED|INTERNAL_ERROR)
+                echo "Build failed with status: $STATUS"
+                gcloud builds log "$BUILD_ID" --region=${{ needs.load-config.outputs.region }} 2>/dev/null || true
+                exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done
